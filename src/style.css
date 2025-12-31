@@ -166,6 +166,11 @@ input:focus {
   box-shadow: 0 0 0 3px var(--accent-glow);
 }
 
+input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* Options row */
 .options {
   display: flex;

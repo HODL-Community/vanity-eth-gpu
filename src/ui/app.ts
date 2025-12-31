@@ -80,7 +80,7 @@ export function initApp(root: HTMLDivElement) {
     <div class="panel">
       <div class="preview" id="preview">
         <div class="preview-label">Address Preview</div>
-        <div class="preview-address" id="preview-addr">0x0000000000000000000000000000000000000000</div>
+        <div class="preview-address" id="preview-addr"></div>
       </div>
 
       <div class="input-group">
@@ -233,6 +233,11 @@ export function initApp(root: HTMLDivElement) {
     copyPk.classList.add('hidden')
     lastFound = null
 
+    // Disable inputs while running
+    prefixInput.disabled = true
+    suffixInput.disabled = true
+    caseSensitive.disabled = true
+
     const pre = sanitizeHex(prefixInput.value)
     const suf = sanitizeHex(suffixInput.value)
     const preLower = pre.toLowerCase()
@@ -242,6 +247,9 @@ export function initApp(root: HTMLDivElement) {
       btnGenerate.textContent = 'Generate'
       btnGenerate.classList.remove('running')
       previewEl.classList.remove('generating')
+      prefixInput.disabled = false
+      suffixInput.disabled = false
+      caseSensitive.disabled = false
       return
     }
 
@@ -289,6 +297,11 @@ export function initApp(root: HTMLDivElement) {
     }
 
     pool.destroy()
+
+    // Re-enable inputs
+    prefixInput.disabled = false
+    suffixInput.disabled = false
+    caseSensitive.disabled = false
 
     if (!stopRequested || runState.status === 'running') {
       btnGenerate.textContent = 'Generate'
@@ -354,6 +367,14 @@ export function initApp(root: HTMLDivElement) {
       stopRequested = true
     } else {
       void run()
+    }
+  })
+
+  // Enter key to start/stop
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && document.activeElement?.tagName !== 'BUTTON') {
+      e.preventDefault()
+      btnGenerate.click()
     }
   })
 
