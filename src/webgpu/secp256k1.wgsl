@@ -419,7 +419,7 @@ fn keccak256(pubkey: ptr<private, array<u32, 16>>) {
   }
 }
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let idx = gid.x;
   let batch_size = params[0];

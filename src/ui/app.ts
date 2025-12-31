@@ -262,7 +262,7 @@ export function initApp(root: HTMLDivElement) {
     if (gpu) {
       // Full GPU path - secp256k1 + Keccak entirely on GPU
       subtitleEl.textContent = 'Running on GPU (full secp256k1)'
-      const batchSize = 4096
+      const batchSize = 16384
 
       while (!stopRequested) {
         try {

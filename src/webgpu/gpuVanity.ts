@@ -14,7 +14,6 @@ function u32ArrayToHex(arr: Uint32Array, start: number, count: number): string {
   let hex = ''
   for (let i = 0; i < count; i++) {
     const val = arr[start + i]
-    // Little-endian u32 to bytes
     hex += (val & 0xff).toString(16).padStart(2, '0')
     hex += ((val >> 8) & 0xff).toString(16).padStart(2, '0')
     hex += ((val >> 16) & 0xff).toString(16).padStart(2, '0')
@@ -23,54 +22,55 @@ function u32ArrayToHex(arr: Uint32Array, start: number, count: number): string {
   return hex
 }
 
+const MAX_BATCH_SIZE = 32768
+
 export async function createGpuVanity(): Promise<GpuVanity> {
   if (!navigator.gpu) throw new Error('WebGPU not supported')
 
-  const adapter = await navigator.gpu.requestAdapter()
+  const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' })
   if (!adapter) throw new Error('No WebGPU adapter')
 
   const device = await adapter.requestDevice()
 
-  // Log any GPU errors
-  device.onuncapturederror = (e) => {
-    console.error('WebGPU error:', e.error)
-  }
-
   const module = device.createShaderModule({ code: shaderSource })
-
-  // Check for shader compilation errors
-  const compilationInfo = await module.getCompilationInfo()
-  for (const msg of compilationInfo.messages) {
-    console.log(`Shader ${msg.type}: ${msg.message} at line ${msg.lineNum}`)
-  }
-  if (compilationInfo.messages.some(m => m.type === 'error')) {
-    throw new Error('Shader compilation failed')
-  }
 
   const pipeline = device.createComputePipeline({
     layout: 'auto',
     compute: { module, entryPoint: 'main' }
   })
 
-  // Params buffer: [batchSize, prefixLen, suffixLen, reserved, prefix[40], suffix[40]]
+  // Params buffer
   const paramsBuffer = device.createBuffer({
     size: (4 + 40 + 40) * 4,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
   })
 
-  // Results buffer: [count, results...]
-  // Each result: 8 u32 priv + 8 u32 hash + 1 idx = 17 u32s
-  // Max 16 results = 1 + 16*17 = 273 u32s
+  // Pre-allocate seed buffer for max batch size
+  const seedBuffer = device.createBuffer({
+    size: MAX_BATCH_SIZE * 8 * 4,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+  })
+
+  // Results buffer
   const resultsSize = 274 * 4
   const resultsBuffer = device.createBuffer({
     size: resultsSize,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
   })
 
-  const readbackBuffer = device.createBuffer({
-    size: resultsSize,
-    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
-  })
+  // Double-buffered readback
+  const readbackBuffers = [
+    device.createBuffer({ size: resultsSize, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }),
+    device.createBuffer({ size: resultsSize, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ })
+  ]
+  let currentReadback = 0
+  let pendingMap: Promise<void> | null = null
+
+  // Pre-allocate seed data array
+  const seedData = new Uint32Array(MAX_BATCH_SIZE * 8)
+
+  // Reusable params array
+  const params = new Uint32Array(4 + 40 + 40)
 
   let destroyed = false
 
@@ -80,34 +80,24 @@ export async function createGpuVanity(): Promise<GpuVanity> {
     batchSize: number
   ): Promise<GpuVanityResult | null> {
     if (destroyed) throw new Error('GPU vanity destroyed')
+    if (batchSize > MAX_BATCH_SIZE) batchSize = MAX_BATCH_SIZE
 
-    // Generate random seeds on CPU (max 65536 bytes per call)
-    const seedData = new Uint32Array(batchSize * 8)
-    const maxBytes = 65536
-    const maxU32s = maxBytes / 4
-    for (let offset = 0; offset < seedData.length; offset += maxU32s) {
-      const chunk = seedData.subarray(offset, Math.min(offset + maxU32s, seedData.length))
+    // Generate random seeds (chunked for 65536 byte limit)
+    const seedView = seedData.subarray(0, batchSize * 8)
+    const maxU32s = 65536 / 4
+    for (let offset = 0; offset < seedView.length; offset += maxU32s) {
+      const chunk = seedView.subarray(offset, Math.min(offset + maxU32s, seedView.length))
       crypto.getRandomValues(chunk)
     }
-
-    const seedBuffer = device.createBuffer({
-      size: seedData.byteLength,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
-    })
-    device.queue.writeBuffer(seedBuffer, 0, seedData)
+    device.queue.writeBuffer(seedBuffer, 0, seedView)
 
     // Pack params
-    const params = new Uint32Array(4 + 40 + 40)
     params[0] = batchSize
     params[1] = prefixNibbles.length
     params[2] = suffixNibbles.length
-    params[3] = 0 // reserved
-    for (let i = 0; i < prefixNibbles.length; i++) {
-      params[4 + i] = prefixNibbles[i]
-    }
-    for (let i = 0; i < suffixNibbles.length; i++) {
-      params[44 + i] = suffixNibbles[i]
-    }
+    params[3] = 0
+    for (let i = 0; i < prefixNibbles.length; i++) params[4 + i] = prefixNibbles[i]
+    for (let i = 0; i < suffixNibbles.length; i++) params[44 + i] = suffixNibbles[i]
     device.queue.writeBuffer(paramsBuffer, 0, params)
 
     // Clear results counter
@@ -126,8 +116,18 @@ export async function createGpuVanity(): Promise<GpuVanity> {
     const pass = encoder.beginComputePass()
     pass.setPipeline(pipeline)
     pass.setBindGroup(0, bindGroup)
-    pass.dispatchWorkgroups(Math.ceil(batchSize / 64))
+    pass.dispatchWorkgroups(Math.ceil(batchSize / 256))
     pass.end()
+
+    // Use double buffering
+    const readbackBuffer = readbackBuffers[currentReadback]
+    currentReadback = 1 - currentReadback
+
+    // Wait for any pending map from previous iteration
+    if (pendingMap) {
+      await pendingMap
+      pendingMap = null
+    }
 
     encoder.copyBufferToBuffer(resultsBuffer, 0, readbackBuffer, 0, resultsSize)
     device.queue.submit([encoder.finish()])
@@ -136,21 +136,12 @@ export async function createGpuVanity(): Promise<GpuVanity> {
     const resultData = new Uint32Array(readbackBuffer.getMappedRange().slice(0))
     readbackBuffer.unmap()
 
-    seedBuffer.destroy()
-
     const count = resultData[0]
-    console.log('GPU result count:', count, 'first few results:', resultData.slice(0, 20))
     if (count > 0) {
-      // Extract first result
       const base = 1
       const privHex = u32ArrayToHex(resultData, base, 8)
-
-      // Extract address from hash (last 20 bytes = bytes 12-31)
-      // Hash is in resultData[base+8..base+15]
       const hashHex = u32ArrayToHex(resultData, base + 8, 8)
-      // Address is last 40 hex chars of the 64-char hash
       const addressHex = hashHex.slice(24)
-
       return { privHex, addressHex }
     }
 
@@ -160,8 +151,10 @@ export async function createGpuVanity(): Promise<GpuVanity> {
   function destroy() {
     destroyed = true
     paramsBuffer.destroy()
+    seedBuffer.destroy()
     resultsBuffer.destroy()
-    readbackBuffer.destroy()
+    readbackBuffers[0].destroy()
+    readbackBuffers[1].destroy()
     device.destroy()
   }
 
