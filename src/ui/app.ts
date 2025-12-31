@@ -1,9 +1,10 @@
 import { bytesToHex, hexToBytes, hexToNibbles, nowMs } from '../utils/hex'
 import { createKeystoreV3, type KeystoreV3 } from '../wallet/keystoreV3'
-import { checksumAddress } from '../wallet/ethAddress'
+import { checksumAddress, pubkeyToAddressBytes } from '../wallet/ethAddress'
 import { type PrivKey32 } from '../wallet/keys'
 import { createWorkerPool } from '../worker/pool'
 import { createGpuVanity, type GpuVanity } from '../webgpu/gpuVanity'
+import * as secp from '@noble/secp256k1'
 
 type RunState =
   | { status: 'idle' }
@@ -286,9 +287,20 @@ export function initApp(root: HTMLDivElement) {
           }
 
           if (result) {
-            const foundAddress = checksumAddress('0x' + result.addressHex)
-            // GPU already validated the match, directly mark as found
+            // Verify GPU result with CPU - derive address from private key
             const priv = hexToBytes(result.privHex) as PrivKey32
+            const pub65 = secp.getPublicKey(priv, false)
+            const pub64 = pub65.slice(1)
+            const addrBytes = pubkeyToAddressBytes(pub64)
+            const foundAddress = checksumAddress('0x' + bytesToHex(addrBytes))
+
+            // Check if CPU-verified address actually matches prefix/suffix
+            const addrLower = foundAddress.slice(2).toLowerCase()
+            if (!addrLower.startsWith(preLower) || !addrLower.endsWith(sufLower)) {
+              // GPU gave false positive, keep searching
+              continue
+            }
+
             const timeS = (nowMs() - startedAtMs) / 1000
             const generated: number = runState.status === 'running' ? runState.generated : 0
 
