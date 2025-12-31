@@ -253,7 +253,7 @@ export function initApp(root: HTMLDivElement) {
     // CPU workers using @noble libraries
     const pool = createWorkerPool()
     subtitleEl.textContent = `Running on CPU (${pool.workerCount} workers)`
-    const batchPerWorker = 4096
+    const batchPerWorker = 16384
 
     while (!stopRequested) {
       const promises = []
