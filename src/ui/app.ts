@@ -131,7 +131,7 @@ export function initApp(root: HTMLDivElement) {
           <div class="result-label">Private Key</div>
           <div class="result-value" id="result-pk">
             <span id="pk-text"></span>
-            <button class="copy-btn" id="copy-pk">Copy</button>
+            <button class="copy-btn hidden" id="copy-pk">Copy</button>
           </div>
         </div>
         <div class="actions">
@@ -230,6 +230,7 @@ export function initApp(root: HTMLDivElement) {
     btnGenerate.classList.add('running')
     previewEl.classList.add('generating')
     resultEl.classList.remove('visible', 'found')
+    copyPk.classList.add('hidden')
     lastFound = null
 
     const pre = sanitizeHex(prefixInput.value)
@@ -428,6 +429,7 @@ export function initApp(root: HTMLDivElement) {
   btnReveal.addEventListener('click', () => {
     if (lastFound) {
       pkText.textContent = bytesToHex(lastFound.priv)
+      copyPk.classList.remove('hidden')
     }
   })
 

@@ -305,13 +305,15 @@ input:focus {
 
 .result-value {
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: 12px;
   color: var(--text-primary);
   word-break: break-all;
   padding: 10px 12px;
+  padding-right: 70px;
   background: rgba(0, 0, 0, 0.25);
   border-radius: var(--radius-sm);
   position: relative;
+  min-height: 42px;
 }
 
 .result-value .highlight {
@@ -344,6 +346,10 @@ input:focus {
 .copy-btn.copied {
   color: var(--success);
   border-color: var(--success);
+}
+
+.copy-btn.hidden {
+  display: none;
 }
 
 /* Action buttons */
