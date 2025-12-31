@@ -400,6 +400,22 @@ input:focus {
   color: var(--text-secondary);
 }
 
+.donate {
+  margin-top: 8px;
+}
+
+.donate-addr {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  user-select: all;
+  cursor: pointer;
+}
+
+.donate-addr:hover {
+  color: var(--accent);
+}
+
 /* Pulse animation */
 @keyframes pulse {
   0%, 100% { opacity: 1; }

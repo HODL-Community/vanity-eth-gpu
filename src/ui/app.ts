@@ -142,8 +142,8 @@ export function initApp(root: HTMLDivElement) {
     </div>
 
     <div class="footer">
-      All computations run locally in your browser. For maximum security,
-      disconnect from the internet before generating.
+      <div>All computations run locally in your browser. For maximum security, disconnect from the internet before generating.</div>
+      <div class="donate">Donate: <span class="donate-addr">0x99999933F17A1339958d50b3f59740E5Ad48C74C</span></div>
     </div>
   `
 
