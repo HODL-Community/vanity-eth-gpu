@@ -406,6 +406,15 @@ input:focus {
   color: var(--text-secondary);
 }
 
+.built-by {
+  margin-top: 12px;
+  font-size: 13px;
+}
+
+.built-by a {
+  color: var(--accent);
+}
+
 .open-source {
   margin-top: 10px;
 }
