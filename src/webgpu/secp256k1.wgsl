@@ -405,13 +405,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let prefix_len = params[1];
   let suffix_len = params[2];
 
-  var priv: array<u32, 8>;
+  var privkey: array<u32, 8>;
   let seed_base = idx * 8u;
   for (var i: u32 = 0u; i < 8u; i = i + 1u) {
-    priv[i] = seeds[seed_base + i] ^ (idx * 2654435761u + i * 1597334677u);
+    privkey[i] = seeds[seed_base + i] ^ (idx * 2654435761u + i * 1597334677u);
   }
 
-  scalar_mult(&priv);
+  scalar_mult(&privkey);
 
   var ax: array<u32, 8>;
   var ay: array<u32, 8>;
@@ -453,17 +453,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (nibble != params[44u + i]) { match_ok = false; }
   }
 
-  // DEBUG: Force thread 0 to always match to test result reading
-  if (idx == 0u) {
-    match_ok = true;
-  }
-
   if (match_ok) {
     let slot = atomicAdd(&results[0], 1u);
     if (slot < 16u) {
       let base = 1u + slot * 17u;
       for (var i: u32 = 0u; i < 8u; i = i + 1u) {
-        atomicStore(&results[base + i], priv[i]);
+        atomicStore(&results[base + i], privkey[i]);
         atomicStore(&results[base + 8u + i], state[i]);
       }
       atomicStore(&results[base + 16u], idx);
