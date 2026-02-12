@@ -1,22 +1,18 @@
 {
-  "name": "Vanity ETH GPU",
-  "short_name": "Vanity ETH",
-  "description": "Fast in-browser Ethereum vanity wallet and first contract address generator with GPU acceleration.",
+  "name": "Vanity SOL GPU",
+  "short_name": "Vanity SOL",
+  "description": "Fast in-browser Solana vanity wallet and program ID generator.",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
-  "background_color": "#07080c",
-  "theme_color": "#0b0c12",
+  "background_color": "#05070d",
+  "theme_color": "#05070d",
   "icons": [
     {
-      "src": "/android-chrome-192x192.png",
-      "sizes": "192x192",
-      "type": "image/png"
-    },
-    {
-      "src": "/android-chrome-512x512.png",
-      "sizes": "512x512",
-      "type": "image/png"
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
     }
   ]
 }

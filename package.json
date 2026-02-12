@@ -1,25 +1,27 @@
 {
-  "name": "vanity-eth-webgpu",
+  "name": "vanity-sol-gpu",
   "private": true,
   "version": "0.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
-    "preview": "vite preview"
+    "typecheck": "tsc --noEmit",
+    "build": "npm run typecheck && vite build",
+    "preview": "vite preview",
+    "test:unit": "vitest run",
+    "test:e2e": "playwright test",
+    "test": "npm run test:unit && npm run test:e2e",
+    "check": "npm run build && npm run test:unit && npm run test:e2e"
   },
   "devDependencies": {
+    "@playwright/test": "^1.55.0",
     "@webgpu/types": "^0.1.68",
     "typescript": "~5.9.3",
-    "vite": "^7.2.4"
+    "vite": "^7.2.4",
+    "vitest": "^3.2.4"
   },
   "dependencies": {
-    "@noble/ciphers": "^2.1.1",
     "@noble/curves": "^2.0.1",
-    "@noble/hashes": "^2.0.1",
-    "@noble/secp256k1": "^3.0.0",
-    "tiny-secp256k1": "^2.2.4",
-    "vite-plugin-top-level-await": "^1.6.0",
-    "vite-plugin-wasm": "^3.5.0"
+    "@scure/base": "^2.0.0"
   }
 }

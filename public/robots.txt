@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://hodl-community.github.io/vanity-eth-gpu/sitemap.xml
+Sitemap: https://hodl-community.github.io/vanity-sol-gpu/sitemap.xml
