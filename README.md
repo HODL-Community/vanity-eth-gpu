@@ -8,6 +8,7 @@ A fast Ethereum vanity address generator that runs entirely in your browser.
 - **Privacy First** - All computations run locally in your browser, no server communication
 - **Custom Prefix/Suffix** - Find addresses starting or ending with your desired characters
 - **Wallet + First Contract Targets** - Scan either the wallet address or its first `CREATE` deploy address (nonce 0)
+- **Hybrid Backend** - GPU mode can run CPU workers in parallel for higher total throughput
 - **Keystore Export** - Download encrypted keystore JSON files
 
 ## Requirements

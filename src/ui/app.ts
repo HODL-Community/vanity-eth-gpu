@@ -289,6 +289,12 @@ export function initApp(root: HTMLDivElement) {
     return hex.split('').map(c => parseInt(c, 16))
   }
 
+  function getHybridCpuWorkerCount(): number {
+    const totalWorkers = Math.max(1, navigator.hardwareConcurrency || 4)
+    if (totalWorkers <= 1) return 0
+    return Math.max(1, Math.floor(totalWorkers / 3))
+  }
+
   // Main generation loop - auto-benchmarks GPU vs CPU on first run
   async function run() {
     stopRequested = false
@@ -360,18 +366,37 @@ export function initApp(root: HTMLDivElement) {
       let wasmPool: WasmWorkerPool | null = null
 
       if (gpuAvailable) {
-        // Benchmark GPU
-        subtitleEl.textContent = 'Benchmarking GPU...'
+        // Benchmark GPU+CPU hybrid (GPU matching + CPU worker search in parallel)
+        subtitleEl.textContent = 'Benchmarking GPU+CPU...'
         const dummyNibbles = [0, 0, 0, 0, 0, 0, 0, 0]
         let gpuChecked = 0
         const gpuVanity = await createGpuVanity()
+        const hybridCpuWorkerCount = getHybridCpuWorkerCount()
+        const hybridCpuPool = hybridCpuWorkerCount > 0 ? createWorkerPool(hybridCpuWorkerCount) : null
         const gpuStart = nowMs()
         while (nowMs() - gpuStart < BENCH_DURATION_MS && !stopRequested) {
-          await gpuVanity.search(dummyNibbles, dummyNibbles, BENCH_BATCH, searchTargetToGpuMode(target))
+          const gpuPromise = gpuVanity.search(dummyNibbles, dummyNibbles, BENCH_BATCH, searchTargetToGpuMode(target))
+          const cpuPromises: Promise<{ checked: number; found: { privHex: string; address: string } | null }>[] = []
+
+          if (hybridCpuPool) {
+            for (let i = 0; i < hybridCpuPool.workerCount; i++) {
+              cpuPromises.push(hybridCpuPool.search('00000000', '', BENCH_BATCH, target))
+            }
+          }
+
+          const [, cpuResults] = await Promise.all([
+            gpuPromise,
+            Promise.all(cpuPromises),
+          ])
+
           gpuChecked += BENCH_BATCH
+          for (const result of cpuResults) {
+            gpuChecked += result.checked
+          }
         }
         gpuSpeed = gpuChecked / ((nowMs() - gpuStart) / 1000)
         gpuVanity.destroy()
+        hybridCpuPool?.destroy()
 
         if (stopRequested) { resetUI(); return }
       }
@@ -437,7 +462,7 @@ export function initApp(root: HTMLDivElement) {
 
       // Show result for 2 seconds
       const parts: string[] = []
-      if (gpuAvailable) parts.push(`GPU: ${formatNumber(Math.round(gpuSpeed))}/s`)
+      if (gpuAvailable) parts.push(`GPU+CPU: ${formatNumber(Math.round(gpuSpeed))}/s`)
       if (wasmPool) parts.push(`WASM: ${formatNumber(Math.round(wasmSpeed))}/s`)
       parts.push(`CPU: ${formatNumber(Math.round(cpuSpeed))}/s`)
       subtitleEl.textContent = `${parts.join(' | ')} → Using ${winner.toUpperCase()}`
@@ -458,30 +483,55 @@ export function initApp(root: HTMLDivElement) {
     let recentStartMs = nowMs()
 
     if (cachedBackend === 'gpu') {
-      // ── GPU path ──
+      // ── GPU+CPU hybrid path ──
       const gpuVanity = await createGpuVanity()
-      subtitleEl.textContent = 'Running on GPU (WebGPU)'
+      const hybridCpuWorkerCount = getHybridCpuWorkerCount()
+      const hybridCpuPool = hybridCpuWorkerCount > 0 ? createWorkerPool(hybridCpuWorkerCount) : null
+      subtitleEl.textContent = hybridCpuPool
+        ? `Running hybrid: GPU + CPU (${hybridCpuPool.workerCount} workers)`
+        : 'Running on GPU (WebGPU)'
       const prefixNibbles = hexToNibbles(preLower)
       const suffixNibbles = hexToNibbles(sufLower)
       const gpuBatchSize = 16384
 
       while (!stopRequested) {
-        const result = await gpuVanity.search(
+        const gpuPromise = gpuVanity.search(
           prefixNibbles,
           suffixNibbles,
           gpuBatchSize,
-          searchTargetToGpuMode(target)
+          searchTargetToGpuMode(target),
         )
+        const cpuPromises: Promise<{ checked: number; found: { privHex: string; address: string } | null }>[] = []
+
+        if (hybridCpuPool) {
+          for (let i = 0; i < hybridCpuPool.workerCount; i++) {
+            cpuPromises.push(hybridCpuPool.search(preLower, sufLower, gpuBatchSize, target))
+          }
+        }
+
+        const [result, cpuResults] = await Promise.all([
+          gpuPromise,
+          Promise.all(cpuPromises),
+        ])
 
         if (result && runState.status === 'running') {
           const foundAddress = checksumAddress(result.addressHex)
           handleFound(result.privHex, foundAddress, pre, suf, target)
         }
 
-        if (runState.status === 'running') {
-          runState = { ...runState, generated: runState.generated + gpuBatchSize }
+        let totalChecked = gpuBatchSize
+        for (const cpuResult of cpuResults) {
+          totalChecked += cpuResult.checked
+          if (cpuResult.found && runState.status === 'running') {
+            const foundAddress = checksumAddress(cpuResult.found.address)
+            handleFound(cpuResult.found.privHex, foundAddress, pre, suf, target)
+          }
         }
-        recentGenerated += gpuBatchSize
+
+        if (runState.status === 'running') {
+          runState = { ...runState, generated: runState.generated + totalChecked }
+        }
+        recentGenerated += totalChecked
 
         const elapsed = nowMs() - recentStartMs
         if (elapsed >= 500 && runState.status === 'running') {
@@ -494,6 +544,7 @@ export function initApp(root: HTMLDivElement) {
       }
 
       gpuVanity.destroy()
+      hybridCpuPool?.destroy()
     } else if (cachedBackend === 'wasm') {
       // ── WASM path (pool already initialized from benchmark) ──
       const pool = await createWasmWorkerPool(10000)
