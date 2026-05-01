@@ -16,16 +16,23 @@ A fast Ethereum vanity address generator that runs entirely in your browser.
 
 ## Usage
 
-1. Choose target: wallet address or first contract address
-2. Enter your desired prefix and/or suffix (hex characters: 0-9, a-f)
-3. Click Generate and wait for a match
-4. Once found, reveal the private key or download as encrypted keystore
+1. Choose target: wallet address or first contract address.
+2. Enter your desired prefix and/or suffix (hex characters: 0-9, a-f).
+3. Click Generate and wait for a match.
+4. Confirm the result shows the local verification badge.
+5. Reveal the private key or download an encrypted keystore.
+
+## Contract target caveat
+
+The contract target is specifically the first `CREATE` deployment address at nonce 0 for the generated deployer wallet. If that wallet sends any other transaction first, the first-contract address changes.
 
 ## Security
 
-- Disconnect from the internet before generating for maximum security
-- Never share your private key
-- Always verify the address matches your requirements before use
+- All scanning runs locally in your browser.
+- Disconnect from the internet after the page loads for maximum security.
+- Never share your private key.
+- The UI re-derives the wallet/target address from the private key before display/export.
+- Impossible or contradictory prefix/suffix combinations are blocked before generation starts.
 
 ## Development
 
@@ -36,8 +43,14 @@ npm install
 # Start dev server
 npm run dev
 
+# Run tests
+npm test
+
 # Build for production
 npm run build
+
+# Check dependency audit
+npm audit
 ```
 
 ## Tech Stack

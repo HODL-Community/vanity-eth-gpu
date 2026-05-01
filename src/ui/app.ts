@@ -6,6 +6,7 @@ import { createWasmWorkerPool, type WasmWorkerPool } from '../worker/wasmPool'
 import { createGpuVanity } from '../webgpu/gpuVanity'
 import { type SearchTarget, searchTargetToGpuMode } from '../searchTarget'
 import { verifyFoundResult } from '../vanityResult'
+import { ADDRESS_NIBBLE_LENGTH, calculatePatternDifficulty, mergeAddressPattern } from '../searchPattern'
 
 // Benchmark cache: once determined, reuse the winner for the session
 let cachedBackend: 'gpu' | 'wasm' | 'cpu' | null = null
@@ -35,19 +36,8 @@ function formatTime(seconds: number): string {
   return `${(seconds / 31536000).toFixed(1)}y`
 }
 
-function countLetters(s: string): number {
-  return (s.match(/[a-fA-F]/g) || []).length
-}
-
-function calculateDifficulty(prefix: string, suffix: string, caseSensitive: boolean): number {
-  const base = Math.pow(16, prefix.length + suffix.length)
-  if (!caseSensitive) return base
-  // Case-sensitive mode adds one binary constraint per alpha nibble.
-  const letters = countLetters(prefix) + countLetters(suffix)
-  return base * Math.pow(2, letters)
-}
-
 function estimateTime(difficulty: number, speed: number): string {
+  if (!Number.isFinite(difficulty)) return 'Impossible'
   if (speed === 0) return '-'
   const avgAttempts = difficulty / 2
   const seconds = avgAttempts / speed
@@ -100,11 +90,11 @@ export function initApp(root: HTMLDivElement) {
       <div class="input-group">
         <div class="field">
           <label for="prefix">Prefix</label>
-          <input type="text" id="prefix" placeholder="c0ffee" spellcheck="false" autocomplete="off">
+          <input type="text" id="prefix" placeholder="c0ffee" spellcheck="false" autocomplete="off" maxlength="40" inputmode="text" pattern="[0-9a-fA-F]*">
         </div>
         <div class="field">
           <label for="suffix">Suffix</label>
-          <input type="text" id="suffix" placeholder="beef" spellcheck="false" autocomplete="off">
+          <input type="text" id="suffix" placeholder="beef" spellcheck="false" autocomplete="off" maxlength="40" inputmode="text" pattern="[0-9a-fA-F]*">
         </div>
       </div>
 
@@ -118,7 +108,7 @@ export function initApp(root: HTMLDivElement) {
             </label>
             <label class="target-option">
               <input type="radio" name="search-target" value="first-contract">
-              <span>Contract</span>
+              <span>First Contract</span>
             </label>
           </div>
         </div>
@@ -132,6 +122,9 @@ export function initApp(root: HTMLDivElement) {
           </div>
         </div>
       </div>
+
+      <div class="helper-text" id="target-help">Wallet mode searches for an address controlled directly by the generated private key.</div>
+      <div class="pattern-warning hidden" id="pattern-warning"></div>
 
       <button class="btn-generate" id="btn-generate">Generate</button>
 
@@ -151,6 +144,7 @@ export function initApp(root: HTMLDivElement) {
       </div>
 
       <div class="result" id="result">
+        <div class="verification-proof" id="verification-proof"></div>
         <div class="result-row">
           <div class="result-label" id="result-addr-label">Address</div>
           <div class="result-value" id="result-addr">
@@ -211,6 +205,9 @@ export function initApp(root: HTMLDivElement) {
   const btnReveal = root.querySelector<HTMLButtonElement>('#btn-reveal')!
   const btnDownload = root.querySelector<HTMLButtonElement>('#btn-download')!
   const subtitleEl = root.querySelector<HTMLDivElement>('#subtitle')!
+  const targetHelp = root.querySelector<HTMLDivElement>('#target-help')!
+  const patternWarning = root.querySelector<HTMLDivElement>('#pattern-warning')!
+  const verificationProof = root.querySelector<HTMLDivElement>('#verification-proof')!
 
   // State
   let runState: RunState = { status: 'idle' }
@@ -235,6 +232,31 @@ export function initApp(root: HTMLDivElement) {
   function updateTargetLabels() {
     const target = selectedTarget()
     previewLabel.textContent = targetPreviewLabel(target)
+    targetHelp.textContent = target === 'first-contract'
+      ? 'First-contract mode targets the first CREATE address at nonce 0. Use the deployer before any other outgoing transaction.'
+      : 'Wallet mode searches for an address controlled directly by the generated private key.'
+  }
+
+  function renderPreviewAddress(pattern: ReturnType<typeof mergeAddressPattern>) {
+    previewAddr.replaceChildren(document.createTextNode('0x'))
+
+    if (pattern.constrainedNibbles === 0 || !pattern.valid) {
+      previewAddr.append(document.createTextNode(generateNoise(ADDRESS_NIBBLE_LENGTH, 0)))
+      return
+    }
+
+    let noiseOffset = 0
+    for (let i = 0; i < ADDRESS_NIBBLE_LENGTH; i++) {
+      const known = pattern.body[i]
+      if (known === null) {
+        previewAddr.append(document.createTextNode(generateNoise(1, noiseOffset++)))
+      } else {
+        const span = document.createElement('span')
+        span.className = 'match'
+        span.textContent = known
+        previewAddr.append(span)
+      }
+    }
   }
 
   // Update preview
@@ -242,21 +264,29 @@ export function initApp(root: HTMLDivElement) {
     updateTargetLabels()
     const pre = sanitizeHex(prefixInput.value)
     const suf = sanitizeHex(suffixInput.value)
-    const preLower = pre.toLowerCase()
-    const sufLower = suf.toLowerCase()
-    const midLen = 40 - pre.length - suf.length
-    const mid = midLen > 0 ? generateNoise(midLen, pre.length) : ''
+    const pattern = mergeAddressPattern(pre, suf, caseSensitive.checked)
 
-    if (pre.length + suf.length === 0) {
-      previewAddr.innerHTML = '0x' + generateNoise(40, 0)
+    renderPreviewAddress(pattern)
+
+    if (!pattern.valid) {
+      patternWarning.textContent = pattern.message || 'This prefix/suffix request is impossible.'
+      patternWarning.classList.remove('hidden')
+    } else if (pre.length + suf.length === 0) {
+      patternWarning.textContent = 'Enter a hex prefix or suffix to start.'
+      patternWarning.classList.remove('hidden')
     } else {
-      previewAddr.innerHTML = `0x<span class="match">${preLower}</span>${mid}<span class="match">${sufLower}</span>`
+      patternWarning.textContent = ''
+      patternWarning.classList.add('hidden')
     }
 
+    btnGenerate.disabled = runState.status !== 'running' && (!pattern.valid || pre.length + suf.length === 0)
+
     // Update ETA based on difficulty
-    const difficulty = calculateDifficulty(pre, suf, caseSensitive.checked)
+    const difficulty = calculatePatternDifficulty(pre, suf, caseSensitive.checked)
     if (runState.status === 'running' && runState.speed > 0) {
       statEta.textContent = estimateTime(difficulty, runState.speed)
+    } else if (!pattern.valid) {
+      statEta.textContent = 'Impossible'
     } else if (pre.length + suf.length > 0) {
       statEta.textContent = `1 in ${formatNumber(difficulty)}`
     } else {
@@ -271,7 +301,7 @@ export function initApp(root: HTMLDivElement) {
       statChecked.textContent = formatNumber(runState.generated)
       const pre = sanitizeHex(prefixInput.value)
       const suf = sanitizeHex(suffixInput.value)
-      const difficulty = calculateDifficulty(pre, suf, caseSensitive.checked)
+      const difficulty = calculatePatternDifficulty(pre, suf, caseSensitive.checked)
       statEta.textContent = estimateTime(difficulty, runState.speed)
     } else if (runState.status === 'found') {
       statChecked.textContent = formatNumber(runState.generated)
@@ -307,15 +337,11 @@ export function initApp(root: HTMLDivElement) {
     const preLower = pre.toLowerCase()
     const sufLower = suf.toLowerCase()
     const target = selectedTarget()
+    const pattern = mergeAddressPattern(pre, suf, caseSensitive.checked)
 
-    if (pre.length + suf.length === 0) {
-      btnGenerate.textContent = 'Generate'
-      btnGenerate.classList.remove('running')
-      previewEl.classList.remove('generating')
-      prefixInput.disabled = false
-      suffixInput.disabled = false
-      for (const input of searchTargetInputs) input.disabled = false
-      caseSensitive.disabled = false
+    if (!pattern.valid || pre.length + suf.length === 0) {
+      resetUI()
+      updatePreview()
       return
     }
 
@@ -609,6 +635,9 @@ export function initApp(root: HTMLDivElement) {
       runState = { status: 'found', generated, time: timeS, foundPriv: priv, foundAddress: verifiedTargetAddress }
       lastFound = { priv, targetAddress: verifiedTargetAddress, walletAddress, target }
       resultAddrLabel.textContent = targetResultLabel(target)
+      verificationProof.textContent = target === 'first-contract'
+        ? 'Verified locally: this private key derives to the deployer wallet, and its first CREATE nonce-0 contract address matches this result.'
+        : 'Verified locally: this private key derives to the displayed wallet address.'
 
       const preMatch = verifiedTargetAddress.slice(2, 2 + pre.length)
       const sufMatch = verifiedTargetAddress.slice(2 + 40 - suf.length)
@@ -632,6 +661,9 @@ export function initApp(root: HTMLDivElement) {
       stopRequested = true
       return true
     }
+
+    patternWarning.textContent = 'Rejected an invalid generated result before display. Retrying with a safer path.'
+    patternWarning.classList.remove('hidden')
 
     return false
   }

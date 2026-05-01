@@ -49,6 +49,7 @@ export function firstContractAddressFromWalletAddress(walletAddress: string): st
 export function checksumAddress(address: string): string {
   const addr = address.toLowerCase().replace(/^0x/, '')
   if (addr.length !== 40) throw new Error('Invalid address length')
+  if (!/^[0-9a-f]{40}$/.test(addr)) throw new Error('Invalid address hex')
   const hash = bytesToHex(keccak_256(new TextEncoder().encode(addr)))
   let out = '0x'
   for (let i = 0; i < addr.length; i++) {
