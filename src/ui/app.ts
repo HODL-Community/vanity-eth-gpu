@@ -1,11 +1,11 @@
-import { bytesToHex, hexToBytes, nowMs } from '../utils/hex'
+import { bytesToHex, nowMs } from '../utils/hex'
 import { createKeystoreV3, type KeystoreV3 } from '../wallet/keystoreV3'
-import { checksumAddress, pubkeyToAddressBytes } from '../wallet/ethAddress'
-import { privateKeyToPublicKey64, type PrivKey32 } from '../wallet/keys'
+import { type PrivKey32 } from '../wallet/keys'
 import { createWorkerPool } from '../worker/pool'
 import { createWasmWorkerPool, type WasmWorkerPool } from '../worker/wasmPool'
 import { createGpuVanity } from '../webgpu/gpuVanity'
 import { type SearchTarget, searchTargetToGpuMode } from '../searchTarget'
+import { verifyFoundResult } from '../vanityResult'
 
 // Benchmark cache: once determined, reuse the winner for the session
 let cachedBackend: 'gpu' | 'wasm' | 'cpu' | null = null
@@ -60,11 +60,6 @@ function targetPreviewLabel(target: SearchTarget): string {
 
 function targetResultLabel(target: SearchTarget): string {
   return target === 'first-contract' ? 'First Contract Address' : 'Wallet Address'
-}
-
-function deriveWalletAddressFromPriv(priv: PrivKey32): string {
-  const pub64 = privateKeyToPublicKey64(priv)
-  return '0x' + bytesToHex(pubkeyToAddressBytes(pub64))
 }
 
 async function copyToClipboard(text: string, btn: HTMLButtonElement) {
@@ -474,8 +469,12 @@ export function initApp(root: HTMLDivElement) {
         )
 
         if (result && runState.status === 'running') {
-          const foundAddress = checksumAddress(result.addressHex)
-          handleFound(result.privHex, foundAddress, pre, suf, target)
+          const accepted = handleFound(result.privHex, result.addressHex, pre, suf, target)
+          if (!accepted && runState.status === 'running') {
+            cachedBackend = 'cpu'
+            subtitleEl.textContent = 'GPU result failed validation, falling back to CPU...'
+            break
+          }
         }
 
         if (runState.status === 'running') {
@@ -520,8 +519,7 @@ export function initApp(root: HTMLDivElement) {
           for (const r of results) {
             totalChecked += r.checked
             if (r.found && runState.status === 'running') {
-              const foundAddress = checksumAddress(r.found.address)
-              handleFound(r.found.privHex, foundAddress, pre, suf, target)
+              handleFound(r.found.privHex, r.found.address, pre, suf, target)
             }
           }
 
@@ -563,8 +561,7 @@ export function initApp(root: HTMLDivElement) {
         for (const r of results) {
           totalChecked += r.checked
           if (r.found && runState.status === 'running') {
-            const foundAddress = checksumAddress(r.found.address)
-            handleFound(r.found.privHex, foundAddress, pre, suf, target)
+            handleFound(r.found.privHex, r.found.address, pre, suf, target)
           }
         }
 
@@ -601,29 +598,21 @@ export function initApp(root: HTMLDivElement) {
     }
   }
 
-  function handleFound(privHex: string, foundAddress: string, pre: string, suf: string, target: SearchTarget) {
-    const preLower = pre.toLowerCase()
-    const sufLower = suf.toLowerCase()
-    const addrToCompare = caseSensitive.checked ? foundAddress : foundAddress.toLowerCase()
+  function handleFound(privHex: string, foundAddress: string, pre: string, suf: string, target: SearchTarget): boolean {
+    const verified = verifyFoundResult(privHex, foundAddress, pre, suf, target, caseSensitive.checked)
 
-    const prefixOk = addrToCompare.slice(2).startsWith(preLower) ||
-      (caseSensitive.checked && addrToCompare.slice(2).startsWith(pre))
-    const suffixOk = addrToCompare.slice(2).endsWith(sufLower) ||
-      (caseSensitive.checked && addrToCompare.slice(2).endsWith(suf))
-
-    if (prefixOk && suffixOk) {
-      const priv = hexToBytes(privHex) as PrivKey32
-      const walletAddress = target === 'wallet' ? foundAddress : deriveWalletAddressFromPriv(priv)
+    if (verified) {
+      const { priv, targetAddress: verifiedTargetAddress, walletAddress } = verified
       const timeS = (nowMs() - (runState as any).startedAtMs) / 1000
       const generated: number = runState.status === 'running' ? runState.generated : 0
 
-      runState = { status: 'found', generated, time: timeS, foundPriv: priv, foundAddress }
-      lastFound = { priv, targetAddress: foundAddress, walletAddress, target }
+      runState = { status: 'found', generated, time: timeS, foundPriv: priv, foundAddress: verifiedTargetAddress }
+      lastFound = { priv, targetAddress: verifiedTargetAddress, walletAddress, target }
       resultAddrLabel.textContent = targetResultLabel(target)
 
-      const preMatch = foundAddress.slice(2, 2 + pre.length)
-      const sufMatch = foundAddress.slice(2 + 40 - suf.length)
-      const midPart = foundAddress.slice(2 + pre.length, 2 + 40 - suf.length)
+      const preMatch = verifiedTargetAddress.slice(2, 2 + pre.length)
+      const sufMatch = verifiedTargetAddress.slice(2 + 40 - suf.length)
+      const midPart = verifiedTargetAddress.slice(2 + pre.length, 2 + 40 - suf.length)
 
       addrText.innerHTML = `0x<span class="highlight">${preMatch}</span>${midPart}<span class="highlight">${sufMatch}</span>`
       walletText.textContent = walletAddress
@@ -641,7 +630,10 @@ export function initApp(root: HTMLDivElement) {
       updateStats()
 
       stopRequested = true
+      return true
     }
+
+    return false
   }
 
   // Event listeners
