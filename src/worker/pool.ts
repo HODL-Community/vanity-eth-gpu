@@ -16,8 +16,9 @@ export type WorkerPool = {
   workerCount: number
 }
 
-export function createWorkerPool(): WorkerPool {
-  const workerCount = Math.max(1, navigator.hardwareConcurrency || 4)
+export function createWorkerPool(preferredWorkerCount?: number): WorkerPool {
+  const defaultCount = Math.max(1, navigator.hardwareConcurrency || 4)
+  const workerCount = Math.max(1, Math.min(defaultCount, preferredWorkerCount ?? defaultCount))
   const workers: Worker[] = []
   const pending = new Map<number, PendingTask>()
   let nextId = 0
