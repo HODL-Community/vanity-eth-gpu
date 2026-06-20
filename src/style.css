@@ -11,14 +11,32 @@
   --text-primary: #f0f1f5;
   --text-secondary: rgba(240, 241, 245, 0.65);
   --text-muted: rgba(240, 241, 245, 0.45);
+
+  /* One accent family — every blue in the UI derives from these */
   --accent: #627eea;
+  --accent-2: #4f64c7;        /* gradient end / pressed */
+  --accent-hi: #8fa7ff;       /* highlight: selected borders, links-on-accent */
   --accent-glow: rgba(99, 126, 234, 0.25);
+  --accent-soft: rgba(99, 126, 234, 0.08);
+  --grad-accent: linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%);
+
   --success: #4ade80;
   --success-glow: rgba(74, 222, 128, 0.2);
+  --warning: #fbbf24;
+  --danger: #f87171;
+
+  /* Shared interaction surfaces so hovers/borders stay identical everywhere */
+  --surface: rgba(255, 255, 255, 0.05);
+  --surface-hover: rgba(255, 255, 255, 0.1);
+  --border-hover: rgba(255, 255, 255, 0.15);
+
   --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   --font-mono: ui-monospace, 'SF Mono', Menlo, Monaco, 'Cascadia Code', monospace;
   --radius: 12px;
   --radius-sm: 8px;
+
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);   /* gentle ease-out for entrances */
+  --speed: 0.18s;
 }
 
 html {
@@ -57,17 +75,34 @@ a:hover { text-decoration: underline; }
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 56px;
-  height: 56px;
+  width: 60px;
+  height: 60px;
   margin-bottom: 16px;
-  background: linear-gradient(135deg, #627eea 0%, #3b4d9b 100%);
-  border-radius: 16px;
-  box-shadow: 0 8px 32px rgba(99, 126, 234, 0.3);
+  /* dark plate so the white Ethereum mark + colored paint read clearly */
+  background: radial-gradient(120% 120% at 30% 20%, #1b2340 0%, #0b0e1c 70%);
+  border: 1px solid rgba(143, 167, 255, 0.22);
+  border-radius: 17px;
+  box-shadow: 0 10px 30px rgba(99, 126, 234, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 
-.logo svg {
-  width: 28px;
-  height: 28px;
+.logo-mark {
+  width: 42px;
+  height: 42px;
+  /* one-shot reveal: the brush "paints" the mark in on load */
+  transform-origin: center;
+}
+
+/* Transform-only entrance: the brush stays fully opaque, so it's visible even
+   if the animation never runs — it just settles into place when it does. */
+.logo-brush {
+  transform-box: fill-box;
+  transform-origin: 70% 30%;
+  animation: brush-in 0.7s var(--ease) backwards 0.15s;
+}
+
+@keyframes brush-in {
+  from { transform: translate(5px, -7px) rotate(-10deg); }
+  to   { transform: translate(0, 0) rotate(0); }
 }
 
 .title {
@@ -195,7 +230,7 @@ input:disabled {
   padding: 10px 12px;
   font-size: 12px;
   line-height: 1.4;
-  color: #fbbf24;
+  color: var(--warning);
   background: rgba(251, 191, 36, 0.08);
   border: 1px solid rgba(251, 191, 36, 0.22);
   border-radius: var(--radius-sm);
@@ -239,6 +274,7 @@ input:disabled {
 
 .target-option {
   position: relative;
+  display: flex;          /* let the span stretch to the toggle's row height */
   cursor: pointer;
 }
 
@@ -249,16 +285,20 @@ input:disabled {
 }
 
 .target-option span {
-  display: block;
-  width: 100%;
-  text-align: center;
-  padding: 8px 10px;
-  font-size: 13px;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  padding: 7px 8px;
+  font-size: 12px;
   font-weight: 500;
+  white-space: nowrap;
   color: var(--text-secondary);
   border-radius: 6px;
   border: 1px solid transparent;
-  transition: all 0.15s;
+  transition: color var(--speed) var(--ease), background var(--speed) var(--ease),
+    border-color var(--speed) var(--ease), box-shadow var(--speed) var(--ease);
 }
 
 .target-option:hover span {
@@ -268,9 +308,9 @@ input:disabled {
 
 .target-option input:checked + span {
   color: #fff;
-  background: linear-gradient(135deg, #627eea 0%, #4f64c7 100%);
+  background: var(--grad-accent);
   border-color: rgba(143, 167, 255, 0.6);
-  box-shadow: 0 4px 14px rgba(99, 126, 234, 0.25);
+  box-shadow: 0 4px 14px var(--accent-glow);
 }
 
 .target-option input:focus-visible + span {
@@ -292,6 +332,7 @@ input:disabled {
 
 .case-option {
   position: relative;
+  display: flex;
   cursor: pointer;
 }
 
@@ -302,16 +343,20 @@ input:disabled {
 }
 
 .case-option span {
-  display: block;
-  width: 100%;
-  text-align: center;
-  padding: 8px 10px;
-  font-size: 13px;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  padding: 7px 8px;
+  font-size: 12px;
   font-weight: 500;
+  white-space: nowrap;
   color: var(--text-secondary);
   border-radius: 6px;
   border: 1px solid transparent;
-  transition: all 0.15s;
+  transition: color var(--speed) var(--ease), background var(--speed) var(--ease),
+    border-color var(--speed) var(--ease), box-shadow var(--speed) var(--ease);
 }
 
 .case-option:hover span {
@@ -321,9 +366,9 @@ input:disabled {
 
 .case-option input:checked + span {
   color: #fff;
-  background: linear-gradient(135deg, #627eea 0%, #4f64c7 100%);
+  background: var(--grad-accent);
   border-color: rgba(143, 167, 255, 0.6);
-  box-shadow: 0 4px 14px rgba(99, 126, 234, 0.25);
+  box-shadow: 0 4px 14px var(--accent-glow);
 }
 
 .case-option input:focus-visible + span {
@@ -344,20 +389,28 @@ input:disabled {
   font-size: 15px;
   font-weight: 600;
   color: #fff;
-  background: linear-gradient(135deg, #627eea 0%, #4f64c7 100%);
+  background: var(--grad-accent);
   border: none;
   border-radius: var(--radius);
   cursor: pointer;
-  transition: transform 0.1s, box-shadow 0.2s;
+  box-shadow: 0 4px 16px var(--accent-glow);
+  transition: transform 0.12s var(--ease), box-shadow 0.2s var(--ease), filter 0.2s var(--ease);
 }
 
 .btn-generate:hover:not(:disabled) {
   transform: translateY(-1px);
-  box-shadow: 0 8px 24px rgba(99, 126, 234, 0.35);
+  filter: brightness(1.06);
+  box-shadow: 0 10px 26px rgba(99, 126, 234, 0.4);
 }
 
 .btn-generate:active:not(:disabled) {
-  transform: translateY(0);
+  transform: translateY(0) scale(0.99);
+  box-shadow: 0 4px 14px var(--accent-glow);
+}
+
+.btn-generate:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-glow), 0 4px 16px var(--accent-glow);
 }
 
 .btn-generate:disabled {
@@ -519,16 +572,27 @@ input:disabled {
   font-size: 13px;
   font-weight: 600;
   color: var(--text-primary);
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   cursor: pointer;
-  transition: all 0.15s;
+  transition: background var(--speed) var(--ease), border-color var(--speed) var(--ease),
+    transform 0.12s var(--ease), box-shadow 0.2s var(--ease);
 }
 
 .btn:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.1);
-  border-color: rgba(255, 255, 255, 0.15);
+  background: var(--surface-hover);
+  border-color: var(--border-hover);
+}
+
+.btn:active:not(:disabled) {
+  transform: scale(0.985);
+}
+
+.btn:focus-visible {
+  outline: none;
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px var(--accent-glow);
 }
 
 .btn:disabled {
@@ -537,12 +601,13 @@ input:disabled {
 }
 
 .btn-primary {
-  background: linear-gradient(135deg, #627eea 0%, #4f64c7 100%);
+  background: var(--grad-accent);
   border-color: transparent;
 }
 
 .btn-primary:hover:not(:disabled) {
-  box-shadow: 0 4px 16px rgba(99, 126, 234, 0.3);
+  filter: brightness(1.06);
+  box-shadow: 0 4px 16px var(--accent-glow);
 }
 
 /* Footer */
@@ -699,7 +764,7 @@ input:disabled {
 .modal-error {
   min-height: 16px;
   font-size: 12px;
-  color: #f87171;
+  color: var(--danger);
   margin-bottom: 12px;
 }
 
@@ -770,5 +835,26 @@ input:disabled {
 
   .actions {
     grid-template-columns: 1fr;
+  }
+}
+
+/* Orchestrated one-shot page-load reveal. Transform-only (no opacity fade) so
+   content is ALWAYS visible — a stalled/throttled animation can never blank the
+   page. GPU-composited, so it never competes with the search workload. */
+@keyframes rise {
+  from { transform: translateY(12px); }
+  to   { transform: translateY(0); }
+}
+
+.header { animation: rise 0.6s var(--ease) backwards; }
+.panel  { animation: rise 0.6s var(--ease) backwards 0.07s; }
+.footer { animation: rise 0.6s var(--ease) backwards 0.14s; }
+
+/* Respect users who prefer reduced motion (and save their battery). */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
   }
 }
