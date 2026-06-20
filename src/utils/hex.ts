@@ -2,10 +2,6 @@ export function nowMs() {
   return (typeof performance !== 'undefined' ? performance.now() : Date.now())
 }
 
-export function clamp(n: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, n))
-}
-
 export function bytesToHex(bytes: Uint8Array): string {
   let out = ''
   for (let i = 0; i < bytes.length; i++) {
@@ -34,12 +30,6 @@ export function hexToNibbles(hex: string): number[] {
   return out
 }
 
-export function nibblesToLowerHex(nibbles: number[]): string {
-  const hex = '0123456789abcdef'
-  let out = ''
-  for (const n of nibbles) out += hex[n & 0xf]
-  return out
-}
 
 
 

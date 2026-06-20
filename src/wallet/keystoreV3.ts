@@ -1,10 +1,17 @@
-import { pbkdf2Async } from '@noble/hashes/pbkdf2.js'
-import { sha256 } from '@noble/hashes/sha2.js'
+import { scryptAsync } from '@noble/hashes/scrypt.js'
 import { keccak_256 } from '@noble/hashes/sha3.js'
 import { ctr } from '@noble/ciphers/aes.js'
 import { bytesToHex } from '../utils/hex'
 import { privateKeyToPublicKey64, type PrivKey32 } from './keys'
 import { pubkeyToAddressBytes } from './ethAddress'
+
+// scrypt work factor. N=131072 (r=8,p=1) uses ~128 MB and is dramatically more
+// resistant to GPU/ASIC cracking of a leaked keystore than the legacy PBKDF2
+// c=65536 default. Standard Web3 Secret Storage params — importable by geth,
+// MetaMask, MyEtherWallet, ethers, etc.
+const SCRYPT_N = 131072
+const SCRYPT_R = 8
+const SCRYPT_P = 1
 
 export type KeystoreV3 = {
   version: 3
@@ -14,11 +21,12 @@ export type KeystoreV3 = {
     ciphertext: string
     cipherparams: { iv: string }
     cipher: 'aes-128-ctr'
-    kdf: 'pbkdf2'
+    kdf: 'scrypt'
     kdfparams: {
       dklen: 32
-      c: 65536
-      prf: 'hmac-sha256'
+      n: number
+      r: number
+      p: number
       salt: string
     }
     mac: string
@@ -35,7 +43,7 @@ export async function createKeystoreV3(priv: PrivKey32, password: string): Promi
   const iv = new Uint8Array(16)
   window.crypto.getRandomValues(iv)
 
-  const dk = await pbkdf2Async(sha256, password, salt, { c: 65536, dkLen: 32 })
+  const dk = await scryptAsync(password, salt, { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P, dkLen: 32 })
   const key = dk.slice(0, 16)
 
   const aes = ctr(key, iv)
@@ -57,11 +65,12 @@ export async function createKeystoreV3(priv: PrivKey32, password: string): Promi
       ciphertext: bytesToHex(ciphertext),
       cipherparams: { iv: bytesToHex(iv) },
       cipher: 'aes-128-ctr',
-      kdf: 'pbkdf2',
+      kdf: 'scrypt',
       kdfparams: {
         dklen: 32,
-        c: 65536,
-        prf: 'hmac-sha256',
+        n: SCRYPT_N,
+        r: SCRYPT_R,
+        p: SCRYPT_P,
         salt: bytesToHex(salt),
       },
       mac: bytesToHex(mac),

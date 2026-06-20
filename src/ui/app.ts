@@ -3,7 +3,7 @@ import { createKeystoreV3, type KeystoreV3 } from '../wallet/keystoreV3'
 import { type PrivKey32 } from '../wallet/keys'
 import { createWorkerPool } from '../worker/pool'
 import { createWasmWorkerPool, type WasmWorkerPool } from '../worker/wasmPool'
-import { createGpuVanity } from '../webgpu/gpuVanity'
+import { createGpuVanityPool } from '../webgpu/gpuVanity'
 import { type SearchTarget, searchTargetToGpuMode } from '../searchTarget'
 import { verifyFoundResult } from '../vanityResult'
 import { ADDRESS_NIBBLE_LENGTH, calculatePatternDifficulty, mergeAddressPattern } from '../searchPattern'
@@ -39,9 +39,16 @@ function formatTime(seconds: number): string {
 function estimateTime(difficulty: number, speed: number): string {
   if (!Number.isFinite(difficulty)) return 'Impossible'
   if (speed === 0) return '-'
-  const avgAttempts = difficulty / 2
-  const seconds = avgAttempts / speed
-  return '~' + formatTime(seconds)
+  // The search is memoryless, so report the MEDIAN time (50% chance of a hit by
+  // then) rather than a mean that reads like a deadline. Median attempts = D·ln2.
+  const seconds = (difficulty * Math.LN2) / speed
+  return '~' + formatTime(seconds) + ' (50%)'
+}
+
+// Probability that at least one match has been found after `generated` attempts.
+function chanceFoundByNow(difficulty: number, generated: number): number {
+  if (difficulty <= 0) return 1
+  return 1 - Math.exp(-generated / difficulty)
 }
 
 function targetPreviewLabel(target: SearchTarget): string {
@@ -165,10 +172,19 @@ export function initApp(root: HTMLDivElement) {
             <span id="pk-text"></span>
             <button class="copy-btn hidden" id="copy-pk">Copy</button>
           </div>
+          <div class="copy-warning hidden" id="pk-warning">⚠ Anyone with this key controls all funds. Never paste it into a website or share it — clipboard contents can be read by other apps.</div>
         </div>
         <div class="actions">
           <button class="btn" id="btn-reveal">Reveal Key</button>
           <button class="btn btn-primary" id="btn-download">Download Keystore</button>
+        </div>
+        <div class="security-note">
+          <strong>Before funding this address:</strong>
+          <ul>
+            <li>Verify the full address character-by-character.</li>
+            <li>Reveal &amp; back up the private key or keystore offline.</li>
+            <li>Send a tiny test amount first and confirm you control it.</li>
+          </ul>
         </div>
       </div>
     </div>
@@ -178,6 +194,20 @@ export function initApp(root: HTMLDivElement) {
       <div class="built-by">Built by <a href="https://x.com/snapss" target="_blank" rel="noopener">@snapss</a> & <a href="https://claude.ai" target="_blank" rel="noopener">Claude</a></div>
       <div class="open-source"><a href="https://github.com/HODL-Community/vanity-eth-gpu" target="_blank" rel="noopener">Open Source</a> on GitHub</div>
       <div class="donate">Donate: <span class="donate-addr">0x99999933F17A1339958d50b3f59740E5Ad48C74C</span><button class="copy-btn-small" id="copy-donate">Copy</button></div>
+    </div>
+
+    <div class="modal-overlay" id="pw-modal" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="pw-modal-title">
+        <div class="modal-title" id="pw-modal-title">Encrypt Keystore</div>
+        <div class="modal-desc">Choose a password to encrypt your private key. You'll need this exact password to import the keystore — there is no recovery if you lose it.</div>
+        <input type="password" id="pw-input" class="modal-input" placeholder="Password (min 8 characters)" autocomplete="new-password" spellcheck="false">
+        <input type="password" id="pw-confirm" class="modal-input" placeholder="Confirm password" autocomplete="new-password" spellcheck="false">
+        <div class="modal-error" id="pw-error" aria-live="polite"></div>
+        <div class="modal-actions">
+          <button class="btn" id="pw-cancel">Cancel</button>
+          <button class="btn btn-primary" id="pw-ok">Encrypt &amp; Download</button>
+        </div>
+      </div>
     </div>
   `
 
@@ -213,6 +243,29 @@ export function initApp(root: HTMLDivElement) {
   let runState: RunState = { status: 'idle' }
   let stopRequested = false
   let lastFound: { priv: PrivKey32; targetAddress: string; walletAddress: string; target: SearchTarget } | null = null
+
+  // Cleanup for whatever backend pool is currently active, so an exception
+  // mid-search (e.g. a lost GPU device) can release it instead of leaking.
+  let activePoolCleanup: (() => void) | null = null
+  function runActivePoolCleanup() {
+    if (activePoolCleanup) {
+      try { activePoolCleanup() } catch { /* ignore */ }
+      activePoolCleanup = null
+    }
+  }
+  // Return the UI to the idle state. Never clobbers a displayed 'found' result.
+  function forceIdle() {
+    runActivePoolCleanup()
+    if (runState.status === 'found') return
+    prefixInput.disabled = false
+    suffixInput.disabled = false
+    for (const input of searchTargetInputs) input.disabled = false
+    caseSensitive.disabled = false
+    btnGenerate.textContent = 'Generate'
+    btnGenerate.classList.remove('running')
+    previewEl.classList.remove('generating')
+    runState = { status: 'idle' }
+  }
 
   // Deterministic noise based on position (looks random but stable)
   const noiseChars = '7a3f8c2e9b1d5046'
@@ -303,7 +356,12 @@ export function initApp(root: HTMLDivElement) {
       const suf = sanitizeHex(suffixInput.value)
       const difficulty = calculatePatternDifficulty(pre, suf, caseSensitive.checked)
       statEta.textContent = estimateTime(difficulty, runState.speed)
+      // Surface the live "probability of a hit by now" so a long-but-normal run
+      // doesn't feel broken — it's a memoryless process, not a countdown.
+      const pct = Math.round(chanceFoundByNow(difficulty, runState.generated) * 100)
+      statEta.title = `${pct}% chance of a match by now (median ETA shown)`
     } else if (runState.status === 'found') {
+      statEta.title = ''
       statChecked.textContent = formatNumber(runState.generated)
       statEta.textContent = `Found in ${formatTime(runState.time)}`
     }
@@ -323,7 +381,7 @@ export function initApp(root: HTMLDivElement) {
     resultEl.classList.remove('visible', 'found')
     walletRow.classList.add('hidden')
     walletText.textContent = ''
-    copyPk.classList.add('hidden')
+    maskKey()
     lastFound = null
 
     // Disable inputs while running
@@ -365,9 +423,11 @@ export function initApp(root: HTMLDivElement) {
 
       // Check if GPU is available at all
       let gpuAvailable = false
+      let gpuCount = 0
       try {
-        const testGpu = await createGpuVanity()
-        testGpu.destroy()
+        const testPool = await createGpuVanityPool()
+        gpuCount = testPool.instances.length
+        testPool.destroy()
         gpuAvailable = true
       } catch {
         // WebGPU not available
@@ -381,18 +441,23 @@ export function initApp(root: HTMLDivElement) {
       let wasmPool: WasmWorkerPool | null = null
 
       if (gpuAvailable) {
-        // Benchmark GPU
-        subtitleEl.textContent = 'Benchmarking GPU...'
+        // Benchmark all GPUs together (running in parallel) for a fair
+        // comparison against the multi-worker WASM/CPU pools.
+        subtitleEl.textContent = gpuCount > 1 ? `Benchmarking ${gpuCount} GPUs...` : 'Benchmarking GPU...'
         const dummyNibbles = [0, 0, 0, 0, 0, 0, 0, 0]
+        const mode = searchTargetToGpuMode(target)
         let gpuChecked = 0
-        const gpuVanity = await createGpuVanity()
+        const gpuPool = await createGpuVanityPool()
+        gpuCount = gpuPool.instances.length
         const gpuStart = nowMs()
         while (nowMs() - gpuStart < BENCH_DURATION_MS && !stopRequested) {
-          await gpuVanity.search(dummyNibbles, dummyNibbles, BENCH_BATCH, searchTargetToGpuMode(target))
-          gpuChecked += BENCH_BATCH
+          await Promise.all(gpuPool.instances.map(g =>
+            g.search(dummyNibbles, dummyNibbles, BENCH_BATCH, mode)
+          ))
+          gpuChecked += BENCH_BATCH * gpuPool.instances.length
         }
         gpuSpeed = gpuChecked / ((nowMs() - gpuStart) / 1000)
-        gpuVanity.destroy()
+        gpuPool.destroy()
 
         if (stopRequested) { resetUI(); return }
       }
@@ -458,7 +523,7 @@ export function initApp(root: HTMLDivElement) {
 
       // Show result for 2 seconds
       const parts: string[] = []
-      if (gpuAvailable) parts.push(`GPU: ${formatNumber(Math.round(gpuSpeed))}/s`)
+      if (gpuAvailable) parts.push(`GPU${gpuCount > 1 ? ` x${gpuCount}` : ''}: ${formatNumber(Math.round(gpuSpeed))}/s`)
       if (wasmPool) parts.push(`WASM: ${formatNumber(Math.round(wasmSpeed))}/s`)
       parts.push(`CPU: ${formatNumber(Math.round(cpuSpeed))}/s`)
       subtitleEl.textContent = `${parts.join(' | ')} → Using ${winner.toUpperCase()}`
@@ -479,35 +544,21 @@ export function initApp(root: HTMLDivElement) {
     let recentStartMs = nowMs()
 
     if (cachedBackend === 'gpu') {
-      // ── GPU path ──
-      const gpuVanity = await createGpuVanity()
-      subtitleEl.textContent = 'Running on GPU (WebGPU)'
+      // ── GPU path (one concurrent loop per physical GPU) ──
+      const gpuPool = await createGpuVanityPool()
+      activePoolCleanup = () => gpuPool.destroy()
+      const gpuCount = gpuPool.instances.length
+      subtitleEl.textContent = gpuCount > 1
+        ? `Running on ${gpuCount} GPUs (${gpuPool.labels.join(', ')})`
+        : `Running on GPU (${gpuPool.labels[0]})`
       const prefixNibbles = hexToNibbles(preLower)
       const suffixNibbles = hexToNibbles(sufLower)
       const gpuBatchSize = 16384
+      const mode = searchTargetToGpuMode(target)
 
-      while (!stopRequested) {
-        const result = await gpuVanity.search(
-          prefixNibbles,
-          suffixNibbles,
-          gpuBatchSize,
-          searchTargetToGpuMode(target)
-        )
-
-        if (result && runState.status === 'running') {
-          const accepted = handleFound(result.privHex, result.addressHex, pre, suf, target)
-          if (!accepted && runState.status === 'running') {
-            cachedBackend = 'cpu'
-            subtitleEl.textContent = 'GPU result failed validation, falling back to CPU...'
-            break
-          }
-        }
-
-        if (runState.status === 'running') {
-          runState = { ...runState, generated: runState.generated + gpuBatchSize }
-        }
-        recentGenerated += gpuBatchSize
-
+      // A single timer aggregates throughput; each GPU loop only bumps counters.
+      let gpuInvalid = false
+      const speedTimer = setInterval(() => {
         const elapsed = nowMs() - recentStartMs
         if (elapsed >= 500 && runState.status === 'running') {
           const speed = Math.floor(recentGenerated / (elapsed / 1000))
@@ -516,9 +567,39 @@ export function initApp(root: HTMLDivElement) {
           recentStartMs = nowMs()
           updateStats()
         }
-      }
+      }, 250)
 
-      gpuVanity.destroy()
+      try {
+        // Each GPU runs its own search loop concurrently. They draw independent
+        // random seeds, so no coordination is needed, and a match on any GPU
+        // sets stopRequested, draining all loops.
+        await Promise.all(gpuPool.instances.map(async (gpu) => {
+          while (!stopRequested && !gpuInvalid) {
+            const result = await gpu.search(prefixNibbles, suffixNibbles, gpuBatchSize, mode)
+
+            if (result && runState.status === 'running') {
+              const accepted = handleFound(result.privHex, result.addressHex, pre, suf, target)
+              if (!accepted && runState.status === 'running') {
+                // GPU produced an address its key doesn't control — drain all loops
+                // and fall back to CPU (verifyFoundResult is the safety net).
+                gpuInvalid = true
+                cachedBackend = 'cpu'
+                subtitleEl.textContent = 'GPU result failed validation, falling back to CPU...'
+                break
+              }
+            }
+
+            if (runState.status === 'running') {
+              runState = { ...runState, generated: runState.generated + gpuBatchSize }
+            }
+            recentGenerated += gpuBatchSize
+          }
+        }))
+      } finally {
+        clearInterval(speedTimer)
+        gpuPool.destroy()
+        activePoolCleanup = null
+      }
     } else if (cachedBackend === 'wasm') {
       // ── WASM path (pool already initialized from benchmark) ──
       const pool = await createWasmWorkerPool(10000)
@@ -530,9 +611,57 @@ export function initApp(root: HTMLDivElement) {
       }
 
       if (pool && cachedBackend === 'wasm') {
+        activePoolCleanup = () => pool.destroy()
         subtitleEl.textContent = `Running on WASM (${pool.workerCount} workers)`
         const batchPerWorker = 16384
 
+        try {
+          while (!stopRequested) {
+            const promises = []
+            for (let i = 0; i < pool.workerCount; i++) {
+              promises.push(pool.search(preLower, sufLower, batchPerWorker, target))
+            }
+
+            const results = await Promise.all(promises)
+            let totalChecked = 0
+
+            for (const r of results) {
+              totalChecked += r.checked
+              if (r.found && runState.status === 'running') {
+                handleFound(r.found.privHex, r.found.address, pre, suf, target)
+              }
+            }
+
+            if (runState.status === 'running') {
+              runState = { ...runState, generated: runState.generated + totalChecked }
+            }
+            recentGenerated += totalChecked
+
+            const elapsed = nowMs() - recentStartMs
+            if (elapsed >= 500 && runState.status === 'running') {
+              const speed = Math.floor(recentGenerated / (elapsed / 1000))
+              runState = { ...runState, speed }
+              recentGenerated = 0
+              recentStartMs = nowMs()
+              updateStats()
+            }
+          }
+        } finally {
+          pool.destroy()
+          activePoolCleanup = null
+        }
+      }
+    }
+
+    // CPU fallback (also handles WASM→CPU fallback)
+    if (cachedBackend === 'cpu' && !stopRequested && runState.status === 'running') {
+      // ── CPU path ──
+      const pool = createWorkerPool()
+      activePoolCleanup = () => pool.destroy()
+      subtitleEl.textContent = `Running on CPU (${pool.workerCount} workers)`
+      const batchPerWorker = 16384
+
+      try {
         while (!stopRequested) {
           const promises = []
           for (let i = 0; i < pool.workerCount; i++) {
@@ -563,50 +692,10 @@ export function initApp(root: HTMLDivElement) {
             updateStats()
           }
         }
-
+      } finally {
         pool.destroy()
+        activePoolCleanup = null
       }
-    }
-
-    // CPU fallback (also handles WASM→CPU fallback)
-    if (cachedBackend === 'cpu' && !stopRequested && runState.status === 'running') {
-      // ── CPU path ──
-      const pool = createWorkerPool()
-      subtitleEl.textContent = `Running on CPU (${pool.workerCount} workers)`
-      const batchPerWorker = 16384
-
-      while (!stopRequested) {
-        const promises = []
-        for (let i = 0; i < pool.workerCount; i++) {
-          promises.push(pool.search(preLower, sufLower, batchPerWorker, target))
-        }
-
-        const results = await Promise.all(promises)
-        let totalChecked = 0
-
-        for (const r of results) {
-          totalChecked += r.checked
-          if (r.found && runState.status === 'running') {
-            handleFound(r.found.privHex, r.found.address, pre, suf, target)
-          }
-        }
-
-        if (runState.status === 'running') {
-          runState = { ...runState, generated: runState.generated + totalChecked }
-        }
-        recentGenerated += totalChecked
-
-        const elapsed = nowMs() - recentStartMs
-        if (elapsed >= 500 && runState.status === 'running') {
-          const speed = Math.floor(recentGenerated / (elapsed / 1000))
-          runState = { ...runState, speed }
-          recentGenerated = 0
-          recentStartMs = nowMs()
-          updateStats()
-        }
-      }
-
-      pool.destroy()
     }
 
     // Re-enable inputs
@@ -650,7 +739,7 @@ export function initApp(root: HTMLDivElement) {
       } else {
         walletRow.classList.add('hidden')
       }
-      pkText.textContent = '\u2022'.repeat(64)
+      maskKey() // private key stays hidden until the user explicitly reveals it
 
       resultEl.classList.add('visible', 'found')
       btnGenerate.textContent = 'Generate'
@@ -693,7 +782,15 @@ export function initApp(root: HTMLDivElement) {
     if (runState.status === 'running') {
       stopRequested = true
     } else {
-      void run()
+      run().catch((err) => {
+        // Any unexpected failure (lost GPU device, shader compile error, worker
+        // crash) must not strand the UI in a disabled 'running' state.
+        console.error('[vanity] search failed', err)
+        if (runState.status !== 'found') {
+          subtitleEl.textContent = 'Something went wrong during the search — please reload the page.'
+        }
+        forceIdle()
+      })
     }
   })
 
@@ -705,12 +802,31 @@ export function initApp(root: HTMLDivElement) {
     }
   })
 
+  const pkWarning = root.querySelector<HTMLDivElement>('#pk-warning')!
+  let keyRevealed = false
+
+  function maskKey() {
+    keyRevealed = false
+    pkText.textContent = '•'.repeat(64)
+    copyPk.classList.add('hidden')
+    pkWarning.classList.add('hidden')
+    btnReveal.textContent = 'Reveal Key'
+  }
+
   btnReveal.addEventListener('click', () => {
-    if (lastFound) {
-      pkText.textContent = bytesToHex(lastFound.priv)
-      copyPk.classList.remove('hidden')
-    }
+    if (!lastFound) return
+    if (keyRevealed) { maskKey(); return }
+    keyRevealed = true
+    pkText.textContent = bytesToHex(lastFound.priv)
+    copyPk.classList.remove('hidden')
+    pkWarning.classList.remove('hidden')
+    btnReveal.textContent = 'Hide Key'
   })
+
+  // Re-mask a revealed key when the page loses focus / is hidden, so it isn't
+  // left exposed over the shoulder or in a background tab.
+  window.addEventListener('blur', () => { if (keyRevealed) maskKey() })
+  document.addEventListener('visibilitychange', () => { if (document.hidden && keyRevealed) maskKey() })
 
   copyAddr.addEventListener('click', () => {
     if (lastFound) void copyToClipboard(lastFound.targetAddress, copyAddr)
@@ -726,18 +842,70 @@ export function initApp(root: HTMLDivElement) {
     }
   })
 
+  // Password modal — replaces a bare prompt() so a typo can't silently produce an
+  // undecryptable keystore (which would be permanent fund loss).
+  const pwModal = root.querySelector<HTMLDivElement>('#pw-modal')!
+  const pwInput = root.querySelector<HTMLInputElement>('#pw-input')!
+  const pwConfirm = root.querySelector<HTMLInputElement>('#pw-confirm')!
+  const pwError = root.querySelector<HTMLDivElement>('#pw-error')!
+  const pwOk = root.querySelector<HTMLButtonElement>('#pw-ok')!
+  const pwCancel = root.querySelector<HTMLButtonElement>('#pw-cancel')!
+
+  function promptPassword(): Promise<string | null> {
+    return new Promise((resolve) => {
+      pwInput.value = ''
+      pwConfirm.value = ''
+      pwError.textContent = ''
+      pwModal.hidden = false
+      pwInput.focus()
+
+      const cleanup = () => {
+        pwModal.hidden = true
+        pwOk.removeEventListener('click', onOk)
+        pwCancel.removeEventListener('click', onCancel)
+        pwModal.removeEventListener('keydown', onKey)
+        pwModal.removeEventListener('mousedown', onBackdrop)
+      }
+      const onOk = () => {
+        const p = pwInput.value
+        if (p.length < 8) { pwError.textContent = 'Password must be at least 8 characters.'; pwInput.focus(); return }
+        if (p !== pwConfirm.value) { pwError.textContent = 'Passwords do not match.'; pwConfirm.focus(); return }
+        cleanup(); resolve(p)
+      }
+      const onCancel = () => { cleanup(); resolve(null) }
+      const onKey = (e: KeyboardEvent) => {
+        if (e.key === 'Enter') { e.preventDefault(); onOk() }
+        else if (e.key === 'Escape') { e.preventDefault(); onCancel() }
+      }
+      const onBackdrop = (e: MouseEvent) => { if (e.target === pwModal) onCancel() }
+
+      pwOk.addEventListener('click', onOk)
+      pwCancel.addEventListener('click', onCancel)
+      pwModal.addEventListener('keydown', onKey)
+      pwModal.addEventListener('mousedown', onBackdrop)
+    })
+  }
+
   btnDownload.addEventListener('click', async () => {
     if (!lastFound) return
-    const password = prompt('Enter password for keystore encryption:')
+    const password = await promptPassword()
     if (!password) return
 
-    const ks: KeystoreV3 = await createKeystoreV3(lastFound.priv, password)
-    const blob = new Blob([JSON.stringify(ks, null, 2)], { type: 'application/json' })
-    const a = document.createElement('a')
-    a.href = URL.createObjectURL(blob)
-    a.download = `${lastFound.walletAddress}.json`
-    a.click()
-    URL.revokeObjectURL(a.href)
+    const prevText = btnDownload.textContent
+    btnDownload.disabled = true
+    btnDownload.textContent = 'Encrypting…'
+    try {
+      const ks: KeystoreV3 = await createKeystoreV3(lastFound.priv, password)
+      const blob = new Blob([JSON.stringify(ks, null, 2)], { type: 'application/json' })
+      const a = document.createElement('a')
+      a.href = URL.createObjectURL(blob)
+      a.download = `${lastFound.walletAddress}.json`
+      a.click()
+      URL.revokeObjectURL(a.href)
+    } finally {
+      btnDownload.disabled = false
+      btnDownload.textContent = prevText
+    }
   })
 
   const copyDonate = root.querySelector<HTMLButtonElement>('#copy-donate')!

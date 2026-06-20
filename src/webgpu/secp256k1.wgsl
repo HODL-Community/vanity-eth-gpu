@@ -17,10 +17,14 @@ const RC_LO: array<u32, 24> = array<u32, 24>(
   0x8000808bu, 0x0000008bu, 0x00008089u, 0x00008003u, 0x00008002u, 0x00000080u,
   0x0000800au, 0x8000000au, 0x80008081u, 0x00008080u, 0x80000001u, 0x80008008u
 );
+// High 32 bits of the 24 Keccak round constants. Index 12 was 0x80000000 but
+// the constant RC[12]=0x000000008000808b has high word 0 — that single wrong
+// value corrupted the permutation and produced wrong addresses. Validated
+// against a known keccak256("") vector and @noble end-to-end.
 const RC_HI: array<u32, 24> = array<u32, 24>(
   0x00000000u, 0x00000000u, 0x80000000u, 0x80000000u, 0x00000000u, 0x00000000u,
   0x80000000u, 0x80000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
-  0x80000000u, 0x80000000u, 0x80000000u, 0x80000000u, 0x80000000u, 0x80000000u,
+  0x00000000u, 0x80000000u, 0x80000000u, 0x80000000u, 0x80000000u, 0x80000000u,
   0x00000000u, 0x80000000u, 0x80000000u, 0x80000000u, 0x00000000u, 0x80000000u
 );
 
@@ -44,6 +48,7 @@ var<private> inv_base: array<u32, 8>;
 var<private> pd_xx: array<u32, 8>;
 var<private> pd_yy: array<u32, 8>;
 var<private> pd_yyyy: array<u32, 8>;
+var<private> pd_z3: array<u32, 8>;
 var<private> pd_s: array<u32, 8>;
 var<private> pd_m: array<u32, 8>;
 // Point addition temps
@@ -91,22 +96,32 @@ fn set_zero(a: ptr<private, array<u32, 8>>) {
 
 // 256-bit add, result in c
 fn add256(a: ptr<private, array<u32, 8>>, b: ptr<private, array<u32, 8>>, c: ptr<private, array<u32, 8>>) -> u32 {
+  // Two-step carry. The previous one-liner referenced `carry` inside the same
+  // statement that assigned it (`carry = select(.., carry == 1u && ..)`); that
+  // self-reference is fine on a CPU but some GPU compilers read the just-written
+  // value, corrupting the carry — which produced wrong EC results on hardware.
   var carry: u32 = 0u;
   for (var i: u32 = 0u; i < 8u; i = i + 1u) {
-    let sum: u32 = (*a)[i] + (*b)[i] + carry;
-    carry = select(0u, 1u, sum < (*a)[i] || (carry == 1u && sum <= (*a)[i]));
-    (*c)[i] = sum;
+    let s0 = (*a)[i] + (*b)[i];
+    let k0 = select(0u, 1u, s0 < (*a)[i]);
+    let s1 = s0 + carry;
+    let k1 = select(0u, 1u, s1 < s0);
+    (*c)[i] = s1;
+    carry = k0 + k1;
   }
   return carry;
 }
 
-// 256-bit sub, result in c
+// 256-bit sub, result in c (two-step borrow; see add256 note above).
 fn sub256(a: ptr<private, array<u32, 8>>, b: ptr<private, array<u32, 8>>, c: ptr<private, array<u32, 8>>) -> u32 {
   var borrow: u32 = 0u;
   for (var i: u32 = 0u; i < 8u; i = i + 1u) {
-    let bi: u32 = (*b)[i] + borrow;
-    borrow = select(0u, 1u, (*a)[i] < bi || (borrow == 1u && (*b)[i] == 0xFFFFFFFFu));
-    (*c)[i] = (*a)[i] - bi;
+    let d0 = (*a)[i] - (*b)[i];
+    let k0 = select(0u, 1u, (*a)[i] < (*b)[i]);
+    let d1 = d0 - borrow;
+    let k1 = select(0u, 1u, d0 < borrow);
+    (*c)[i] = d1;
+    borrow = k0 + k1;
   }
   return borrow;
 }
@@ -123,30 +138,35 @@ fn gte_p(a: ptr<private, array<u32, 8>>) -> bool {
   return false;
 }
 
+// Two-step borrow. The previous version both self-referenced `borrow` in its own
+// assignment and compared against `P_i + borrow` (which wraps when P_i=0xFFFFFFFF),
+// so the borrow could be wrong on the GPU — corrupting every modular reduction.
 fn sub_p(a: ptr<private, array<u32, 8>>) {
+  let Pl = array<u32, 8>(P0, P1, P2, P3, P4, P5, P6, P7);
   var borrow: u32 = 0u;
-  var t: u32;
-  t = (*a)[0] - P0 - borrow; borrow = select(0u, 1u, (*a)[0] < P0 + borrow); (*a)[0] = t;
-  t = (*a)[1] - P1 - borrow; borrow = select(0u, 1u, (*a)[1] < P1 + borrow); (*a)[1] = t;
-  t = (*a)[2] - P2 - borrow; borrow = select(0u, 1u, (*a)[2] < P2 + borrow); (*a)[2] = t;
-  t = (*a)[3] - P3 - borrow; borrow = select(0u, 1u, (*a)[3] < P3 + borrow); (*a)[3] = t;
-  t = (*a)[4] - P4 - borrow; borrow = select(0u, 1u, (*a)[4] < P4 + borrow); (*a)[4] = t;
-  t = (*a)[5] - P5 - borrow; borrow = select(0u, 1u, (*a)[5] < P5 + borrow); (*a)[5] = t;
-  t = (*a)[6] - P6 - borrow; borrow = select(0u, 1u, (*a)[6] < P6 + borrow); (*a)[6] = t;
-  t = (*a)[7] - P7 - borrow; (*a)[7] = t;
+  for (var i: u32 = 0u; i < 8u; i = i + 1u) {
+    let d0 = (*a)[i] - Pl[i];
+    let k0 = select(0u, 1u, (*a)[i] < Pl[i]);
+    let d1 = d0 - borrow;
+    let k1 = select(0u, 1u, d0 < borrow);
+    (*a)[i] = d1;
+    borrow = k0 + k1;
+  }
 }
 
+// Two-step carry (the previous `t < (*a)[i]` heuristic mis-detects the carry of a
+// three-term add when P_i is large).
 fn add_p(a: ptr<private, array<u32, 8>>) {
+  let Pl = array<u32, 8>(P0, P1, P2, P3, P4, P5, P6, P7);
   var carry: u32 = 0u;
-  var t: u32;
-  t = (*a)[0] + P0 + carry; carry = select(0u, 1u, t < (*a)[0]); (*a)[0] = t;
-  t = (*a)[1] + P1 + carry; carry = select(0u, 1u, t < (*a)[1]); (*a)[1] = t;
-  t = (*a)[2] + P2 + carry; carry = select(0u, 1u, t < (*a)[2]); (*a)[2] = t;
-  t = (*a)[3] + P3 + carry; carry = select(0u, 1u, t < (*a)[3]); (*a)[3] = t;
-  t = (*a)[4] + P4 + carry; carry = select(0u, 1u, t < (*a)[4]); (*a)[4] = t;
-  t = (*a)[5] + P5 + carry; carry = select(0u, 1u, t < (*a)[5]); (*a)[5] = t;
-  t = (*a)[6] + P6 + carry; carry = select(0u, 1u, t < (*a)[6]); (*a)[6] = t;
-  t = (*a)[7] + P7 + carry; (*a)[7] = t;
+  for (var i: u32 = 0u; i < 8u; i = i + 1u) {
+    let s0 = (*a)[i] + Pl[i];
+    let k0 = select(0u, 1u, s0 < (*a)[i]);
+    let s1 = s0 + carry;
+    let k1 = select(0u, 1u, s1 < s0);
+    (*a)[i] = s1;
+    carry = k0 + k1;
+  }
 }
 
 fn mod_add(a: ptr<private, array<u32, 8>>, b: ptr<private, array<u32, 8>>, c: ptr<private, array<u32, 8>>) {
@@ -175,47 +195,79 @@ fn mod_mul(a: ptr<private, array<u32, 8>>, b: ptr<private, array<u32, 8>>, c: pt
   var prod: array<u32, 16>;
   for (var i: u32 = 0u; i < 16u; i = i + 1u) { prod[i] = 0u; }
 
+  // Schoolbook multiply with correct 64-bit column carry. (The previous
+  // single-expression carry `select(sum<prod)+m.y+(sum<m.x)` dropped a carry
+  // whenever the incoming carry caused a wrap but sum landed >= both addends,
+  // e.g. prod=1,m.x=1,carry=0xFFFFFFFF — producing wrong products.)
   for (var i: u32 = 0u; i < 8u; i = i + 1u) {
     var carry: u32 = 0u;
     for (var j: u32 = 0u; j < 8u; j = j + 1u) {
       let m = mul32((*a)[i], (*b)[j]);
-      var sum = prod[i + j] + m.x + carry;
-      carry = select(0u, 1u, sum < prod[i + j]) + m.y;
-      if (sum < m.x) { carry = carry + 1u; }
-      prod[i + j] = sum;
+      let s0 = prod[i + j] + m.x;
+      let k0 = select(0u, 1u, s0 < m.x);
+      let s1 = s0 + carry;
+      let k1 = select(0u, 1u, s1 < s0);
+      prod[i + j] = s1;
+      carry = m.y + k0 + k1;
     }
     prod[i + 8u] = carry;
   }
 
-  // Reduction for secp256k1: multiply high part by (2^32 + 977) and add
-  for (var i: u32 = 0u; i < 8u; i = i + 1u) { (*c)[i] = prod[i]; }
+  // Reduce mod p = 2^256 - 2^32 - 977, i.e. 2^256 == 2^32 + 977 (mod p).
+  // Fold the high limbs down repeatedly until nothing remains above 2^256.
+  // (The previous single fold dropped the carry out of limb 7 and left the
+  // result in [p, 2p)+, i.e. not fully reduced.)
+  loop {
+    var H: array<u32, 8>;
+    for (var i: u32 = 0u; i < 8u; i = i + 1u) { H[i] = prod[8u + i]; prod[8u + i] = 0u; }
 
-  for (var k: u32 = 0u; k < 8u; k = k + 1u) {
-    let h = prod[8u + k];
-    if (h == 0u) { continue; }
-
-    // Add h * 977
-    let m977 = mul32(h, 977u);
-    var carry = m977.y;
-    var sum = (*c)[k] + m977.x;
-    carry = carry + select(0u, 1u, sum < (*c)[k]);
-    (*c)[k] = sum;
-
-    // Add h (for 2^32 factor) at position k+1
-    if (k + 1u < 8u) {
-      sum = (*c)[k + 1u] + h + carry;
-      carry = select(0u, 1u, sum < (*c)[k + 1u]);
-      (*c)[k + 1u] = sum;
+    // Add H*977 starting at limb 0.
+    var carry: u32 = 0u;
+    for (var i: u32 = 0u; i < 8u; i = i + 1u) {
+      let m = mul32(H[i], 977u);
+      let s0 = prod[i] + m.x;
+      let k0 = select(0u, 1u, s0 < m.x);
+      let s1 = s0 + carry;
+      let k1 = select(0u, 1u, s1 < s0);
+      prod[i] = s1;
+      carry = m.y + k0 + k1;
+    }
+    var idx: u32 = 8u;
+    loop {
+      if (carry == 0u || idx >= 16u) { break; }
+      let s = prod[idx] + carry;
+      carry = select(0u, 1u, s < prod[idx]);
+      prod[idx] = s;
+      idx = idx + 1u;
     }
 
-    // Propagate
-    for (var j: u32 = k + 2u; j < 8u && carry > 0u; j = j + 1u) {
-      sum = (*c)[j] + carry;
-      carry = select(0u, 1u, sum < (*c)[j]);
-      (*c)[j] = sum;
+    // Add H at limb offset 1 (the 2^32 factor).
+    carry = 0u;
+    for (var i: u32 = 0u; i < 8u; i = i + 1u) {
+      let s0 = prod[i + 1u] + H[i];
+      let k0 = select(0u, 1u, s0 < H[i]);
+      let s1 = s0 + carry;
+      let k1 = select(0u, 1u, s1 < s0);
+      prod[i + 1u] = s1;
+      carry = k0 + k1;
     }
+    idx = 9u;
+    loop {
+      if (carry == 0u || idx >= 16u) { break; }
+      let s = prod[idx] + carry;
+      carry = select(0u, 1u, s < prod[idx]);
+      prod[idx] = s;
+      idx = idx + 1u;
+    }
+
+    var hi_nonzero = false;
+    for (var i: u32 = 8u; i < 16u; i = i + 1u) { if (prod[i] != 0u) { hi_nonzero = true; } }
+    if (!hi_nonzero) { break; }
   }
 
+  for (var i: u32 = 0u; i < 8u; i = i + 1u) { (*c)[i] = prod[i]; }
+  // After full folding the value is < 2^256 < 2p, so a single conditional
+  // subtraction fully reduces it into [0, p).
   if (gte_p(c)) { sub_p(c); }
 }
 
@@ -258,6 +310,12 @@ fn init_G() {
 fn point_double_g() {
   if (is_zero_8(&gz)) { return; }
 
+  // Z3 = 2*Y1*Z1 must use the ORIGINAL Y1,Z1. Capture it now, before gy/gz are
+  // overwritten below (the previous code computed it last, after gy was already
+  // set to Y3, which is wrong).
+  mod_mul(&gy, &gz, &tmp1);
+  mod_add(&tmp1, &tmp1, &pd_z3);
+
   mod_sqr(&gx, &pd_xx);
   mod_sqr(&gy, &pd_yy);
   mod_sqr(&pd_yy, &pd_yyyy);
@@ -282,8 +340,7 @@ fn point_double_g() {
   mod_add(&tmp3, &tmp3, &tmp1);
   mod_sub(&tmp2, &tmp1, &gy);
 
-  mod_mul(&gy, &gz, &tmp1);
-  mod_add(&tmp1, &tmp1, &gz);
+  copy_8(&pd_z3, &gz);
 }
 
 // Point addition R = R + G (Jacobian)
