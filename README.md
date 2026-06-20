@@ -4,15 +4,19 @@ A fast Ethereum vanity address generator that runs entirely in your browser.
 
 ## Features
 
-- **Multi-threaded** - Uses Web Workers for parallel address generation
+- **GPU-accelerated** - A WebGPU compute kernel (secp256k1 + Keccak-256) generates and matches addresses directly on the GPU
+- **Multi-GPU** - Runs a parallel search on every GPU the browser exposes (e.g. integrated + discrete)
+- **Auto-benchmark with fallback** - Measures GPU / WebAssembly / CPU-workers on first run and uses whichever is fastest, falling back automatically when WebGPU is unavailable
+- **Verified results** - Every match is re-derived from the private key with a trusted library before it is shown or exported, so a backend miscomputation can never surface a wrong address
 - **Privacy First** - All computations run locally in your browser, no server communication
 - **Custom Prefix/Suffix** - Find addresses starting or ending with your desired characters
 - **Wallet + First Contract Targets** - Scan either the wallet address or its first `CREATE` deploy address (nonce 0)
-- **Keystore Export** - Download encrypted keystore JSON files
+- **Keystore Export** - Download encrypted (scrypt + AES-128-CTR) keystore JSON files
 
 ## Requirements
 
 - A modern browser (Chrome, Firefox, Edge, Safari)
+- WebGPU is used for maximum speed when available; it falls back to WebAssembly / CPU workers automatically
 
 ## Usage
 
@@ -57,8 +61,10 @@ npm audit
 
 - TypeScript
 - Vite
-- Web Workers
-- @noble/secp256k1 for cryptography
+- WebGPU (WGSL compute shaders)
+- Web Workers + WebAssembly
+- @noble/secp256k1, @noble/hashes, @noble/ciphers for cryptography
+- Vitest for the crypto / kernel test suite
 
 ## License
 
