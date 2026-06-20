@@ -184,6 +184,27 @@ input:disabled {
   border-radius: var(--radius-sm);
 }
 
+.helper-text {
+  margin: -8px 0 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.pattern-warning {
+  margin: -4px 0 14px;
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #fbbf24;
+  background: rgba(251, 191, 36, 0.08);
+  border: 1px solid rgba(251, 191, 36, 0.22);
+  border-radius: var(--radius-sm);
+}
+
+.pattern-warning.hidden {
+  display: none;
+}
+
 .target-wrap {
   display: flex;
   flex-direction: column;
@@ -397,6 +418,17 @@ input:disabled {
 .result.found {
   border-color: var(--success);
   box-shadow: 0 0 0 1px var(--success-glow), 0 8px 32px var(--success-glow);
+}
+
+.verification-proof {
+  margin-bottom: 16px;
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--success);
+  background: rgba(74, 222, 128, 0.08);
+  border: 1px solid rgba(74, 222, 128, 0.25);
+  border-radius: var(--radius-sm);
 }
 
 @keyframes slideIn {

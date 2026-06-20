@@ -1,11 +1,12 @@
-import { bytesToHex, hexToBytes, nowMs } from '../utils/hex'
+import { bytesToHex, nowMs } from '../utils/hex'
 import { createKeystoreV3, type KeystoreV3 } from '../wallet/keystoreV3'
-import { checksumAddress, pubkeyToAddressBytes, firstContractAddressFromWalletHex } from '../wallet/ethAddress'
-import { privateKeyToPublicKey64, type PrivKey32 } from '../wallet/keys'
+import { type PrivKey32 } from '../wallet/keys'
 import { createWorkerPool } from '../worker/pool'
 import { createWasmWorkerPool, type WasmWorkerPool } from '../worker/wasmPool'
 import { createGpuVanityPool } from '../webgpu/gpuVanity'
 import { type SearchTarget, searchTargetToGpuMode } from '../searchTarget'
+import { verifyFoundResult } from '../vanityResult'
+import { ADDRESS_NIBBLE_LENGTH, calculatePatternDifficulty, mergeAddressPattern } from '../searchPattern'
 
 // Benchmark cache: once determined, reuse the winner for the session
 let cachedBackend: 'gpu' | 'wasm' | 'cpu' | null = null
@@ -35,19 +36,8 @@ function formatTime(seconds: number): string {
   return `${(seconds / 31536000).toFixed(1)}y`
 }
 
-function countLetters(s: string): number {
-  return (s.match(/[a-fA-F]/g) || []).length
-}
-
-function calculateDifficulty(prefix: string, suffix: string, caseSensitive: boolean): number {
-  const base = Math.pow(16, prefix.length + suffix.length)
-  if (!caseSensitive) return base
-  // Case-sensitive mode adds one binary constraint per alpha nibble.
-  const letters = countLetters(prefix) + countLetters(suffix)
-  return base * Math.pow(2, letters)
-}
-
 function estimateTime(difficulty: number, speed: number): string {
+  if (!Number.isFinite(difficulty)) return 'Impossible'
   if (speed === 0) return '-'
   // The search is memoryless, so report the MEDIAN time (50% chance of a hit by
   // then) rather than a mean that reads like a deadline. Median attempts = D·ln2.
@@ -67,11 +57,6 @@ function targetPreviewLabel(target: SearchTarget): string {
 
 function targetResultLabel(target: SearchTarget): string {
   return target === 'first-contract' ? 'First Contract Address' : 'Wallet Address'
-}
-
-function deriveWalletAddressFromPriv(priv: PrivKey32): string {
-  const pub64 = privateKeyToPublicKey64(priv)
-  return '0x' + bytesToHex(pubkeyToAddressBytes(pub64))
 }
 
 async function copyToClipboard(text: string, btn: HTMLButtonElement) {
@@ -112,11 +97,11 @@ export function initApp(root: HTMLDivElement) {
       <div class="input-group">
         <div class="field">
           <label for="prefix">Prefix</label>
-          <input type="text" id="prefix" placeholder="c0ffee" spellcheck="false" autocomplete="off">
+          <input type="text" id="prefix" placeholder="c0ffee" spellcheck="false" autocomplete="off" maxlength="40" inputmode="text" pattern="[0-9a-fA-F]*">
         </div>
         <div class="field">
           <label for="suffix">Suffix</label>
-          <input type="text" id="suffix" placeholder="beef" spellcheck="false" autocomplete="off">
+          <input type="text" id="suffix" placeholder="beef" spellcheck="false" autocomplete="off" maxlength="40" inputmode="text" pattern="[0-9a-fA-F]*">
         </div>
       </div>
 
@@ -130,7 +115,7 @@ export function initApp(root: HTMLDivElement) {
             </label>
             <label class="target-option">
               <input type="radio" name="search-target" value="first-contract">
-              <span>Contract</span>
+              <span>First Contract</span>
             </label>
           </div>
         </div>
@@ -144,6 +129,9 @@ export function initApp(root: HTMLDivElement) {
           </div>
         </div>
       </div>
+
+      <div class="helper-text" id="target-help">Wallet mode searches for an address controlled directly by the generated private key.</div>
+      <div class="pattern-warning hidden" id="pattern-warning"></div>
 
       <button class="btn-generate" id="btn-generate">Generate</button>
 
@@ -163,6 +151,7 @@ export function initApp(root: HTMLDivElement) {
       </div>
 
       <div class="result" id="result">
+        <div class="verification-proof" id="verification-proof"></div>
         <div class="result-row">
           <div class="result-label" id="result-addr-label">Address</div>
           <div class="result-value" id="result-addr">
@@ -246,25 +235,14 @@ export function initApp(root: HTMLDivElement) {
   const btnReveal = root.querySelector<HTMLButtonElement>('#btn-reveal')!
   const btnDownload = root.querySelector<HTMLButtonElement>('#btn-download')!
   const subtitleEl = root.querySelector<HTMLDivElement>('#subtitle')!
+  const targetHelp = root.querySelector<HTMLDivElement>('#target-help')!
+  const patternWarning = root.querySelector<HTMLDivElement>('#pattern-warning')!
+  const verificationProof = root.querySelector<HTMLDivElement>('#verification-proof')!
 
   // State
   let runState: RunState = { status: 'idle' }
   let stopRequested = false
   let lastFound: { priv: PrivKey32; targetAddress: string; walletAddress: string; target: SearchTarget } | null = null
-
-  // Count candidates discarded by the verification gate. A nonzero count during a
-  // real search means a backend (almost always the GPU kernel on this device) is
-  // miscomputing — surface it so the user isn't left waiting on a broken backend.
-  let rejectedMatches = 0
-  function noteRejectedMatch() {
-    rejectedMatches++
-    if (rejectedMatches === 1 || rejectedMatches % 100 === 0) {
-      console.error(`[vanity] Discarded ${rejectedMatches} match(es) that failed CPU re-derivation — the active backend may be miscomputing addresses on this device.`)
-    }
-    if (rejectedMatches === 25) {
-      subtitleEl.textContent = '⚠️ GPU produced invalid results — verifying on CPU. Try reloading if this persists.'
-    }
-  }
 
   // Cleanup for whatever backend pool is currently active, so an exception
   // mid-search (e.g. a lost GPU device) can release it instead of leaking.
@@ -307,6 +285,31 @@ export function initApp(root: HTMLDivElement) {
   function updateTargetLabels() {
     const target = selectedTarget()
     previewLabel.textContent = targetPreviewLabel(target)
+    targetHelp.textContent = target === 'first-contract'
+      ? 'First-contract mode targets the first CREATE address at nonce 0. Use the deployer before any other outgoing transaction.'
+      : 'Wallet mode searches for an address controlled directly by the generated private key.'
+  }
+
+  function renderPreviewAddress(pattern: ReturnType<typeof mergeAddressPattern>) {
+    previewAddr.replaceChildren(document.createTextNode('0x'))
+
+    if (pattern.constrainedNibbles === 0 || !pattern.valid) {
+      previewAddr.append(document.createTextNode(generateNoise(ADDRESS_NIBBLE_LENGTH, 0)))
+      return
+    }
+
+    let noiseOffset = 0
+    for (let i = 0; i < ADDRESS_NIBBLE_LENGTH; i++) {
+      const known = pattern.body[i]
+      if (known === null) {
+        previewAddr.append(document.createTextNode(generateNoise(1, noiseOffset++)))
+      } else {
+        const span = document.createElement('span')
+        span.className = 'match'
+        span.textContent = known
+        previewAddr.append(span)
+      }
+    }
   }
 
   // Update preview
@@ -314,21 +317,29 @@ export function initApp(root: HTMLDivElement) {
     updateTargetLabels()
     const pre = sanitizeHex(prefixInput.value)
     const suf = sanitizeHex(suffixInput.value)
-    const preLower = pre.toLowerCase()
-    const sufLower = suf.toLowerCase()
-    const midLen = 40 - pre.length - suf.length
-    const mid = midLen > 0 ? generateNoise(midLen, pre.length) : ''
+    const pattern = mergeAddressPattern(pre, suf, caseSensitive.checked)
 
-    if (pre.length + suf.length === 0) {
-      previewAddr.innerHTML = '0x' + generateNoise(40, 0)
+    renderPreviewAddress(pattern)
+
+    if (!pattern.valid) {
+      patternWarning.textContent = pattern.message || 'This prefix/suffix request is impossible.'
+      patternWarning.classList.remove('hidden')
+    } else if (pre.length + suf.length === 0) {
+      patternWarning.textContent = 'Enter a hex prefix or suffix to start.'
+      patternWarning.classList.remove('hidden')
     } else {
-      previewAddr.innerHTML = `0x<span class="match">${preLower}</span>${mid}<span class="match">${sufLower}</span>`
+      patternWarning.textContent = ''
+      patternWarning.classList.add('hidden')
     }
 
+    btnGenerate.disabled = runState.status !== 'running' && (!pattern.valid || pre.length + suf.length === 0)
+
     // Update ETA based on difficulty
-    const difficulty = calculateDifficulty(pre, suf, caseSensitive.checked)
+    const difficulty = calculatePatternDifficulty(pre, suf, caseSensitive.checked)
     if (runState.status === 'running' && runState.speed > 0) {
       statEta.textContent = estimateTime(difficulty, runState.speed)
+    } else if (!pattern.valid) {
+      statEta.textContent = 'Impossible'
     } else if (pre.length + suf.length > 0) {
       statEta.textContent = `1 in ${formatNumber(difficulty)}`
     } else {
@@ -343,7 +354,7 @@ export function initApp(root: HTMLDivElement) {
       statChecked.textContent = formatNumber(runState.generated)
       const pre = sanitizeHex(prefixInput.value)
       const suf = sanitizeHex(suffixInput.value)
-      const difficulty = calculateDifficulty(pre, suf, caseSensitive.checked)
+      const difficulty = calculatePatternDifficulty(pre, suf, caseSensitive.checked)
       statEta.textContent = estimateTime(difficulty, runState.speed)
       // Surface the live "probability of a hit by now" so a long-but-normal run
       // doesn't feel broken — it's a memoryless process, not a countdown.
@@ -364,7 +375,6 @@ export function initApp(root: HTMLDivElement) {
   // Main generation loop - auto-benchmarks GPU vs CPU on first run
   async function run() {
     stopRequested = false
-    rejectedMatches = 0
     btnGenerate.textContent = 'Stop'
     btnGenerate.classList.add('running')
     previewEl.classList.add('generating')
@@ -385,15 +395,11 @@ export function initApp(root: HTMLDivElement) {
     const preLower = pre.toLowerCase()
     const sufLower = suf.toLowerCase()
     const target = selectedTarget()
+    const pattern = mergeAddressPattern(pre, suf, caseSensitive.checked)
 
-    if (pre.length + suf.length === 0) {
-      btnGenerate.textContent = 'Generate'
-      btnGenerate.classList.remove('running')
-      previewEl.classList.remove('generating')
-      prefixInput.disabled = false
-      suffixInput.disabled = false
-      for (const input of searchTargetInputs) input.disabled = false
-      caseSensitive.disabled = false
+    if (!pattern.valid || pre.length + suf.length === 0) {
+      resetUI()
+      updatePreview()
       return
     }
 
@@ -408,14 +414,6 @@ export function initApp(root: HTMLDivElement) {
       previewEl.classList.remove('generating')
       subtitleEl.textContent = 'Fast vanity address generator'
       runState = { status: 'idle' }
-    }
-
-    // An Ethereum address is 40 hex chars; a prefix+suffix longer than that can
-    // never be satisfied, so don't start a futile, never-ending search.
-    if (pre.length + suf.length > 40) {
-      resetUI()
-      subtitleEl.textContent = 'Prefix + suffix can be at most 40 hex characters total.'
-      return
     }
 
     // ── Auto-benchmark on first run (GPU vs WASM vs CPU) ──
@@ -559,6 +557,7 @@ export function initApp(root: HTMLDivElement) {
       const mode = searchTargetToGpuMode(target)
 
       // A single timer aggregates throughput; each GPU loop only bumps counters.
+      let gpuInvalid = false
       const speedTimer = setInterval(() => {
         const elapsed = nowMs() - recentStartMs
         if (elapsed >= 500 && runState.status === 'running') {
@@ -575,12 +574,19 @@ export function initApp(root: HTMLDivElement) {
         // random seeds, so no coordination is needed, and a match on any GPU
         // sets stopRequested, draining all loops.
         await Promise.all(gpuPool.instances.map(async (gpu) => {
-          while (!stopRequested) {
+          while (!stopRequested && !gpuInvalid) {
             const result = await gpu.search(prefixNibbles, suffixNibbles, gpuBatchSize, mode)
 
             if (result && runState.status === 'running') {
-              const foundAddress = checksumAddress(result.addressHex)
-              handleFound(result.privHex, foundAddress, pre, suf, target)
+              const accepted = handleFound(result.privHex, result.addressHex, pre, suf, target)
+              if (!accepted && runState.status === 'running') {
+                // GPU produced an address its key doesn't control — drain all loops
+                // and fall back to CPU (verifyFoundResult is the safety net).
+                gpuInvalid = true
+                cachedBackend = 'cpu'
+                subtitleEl.textContent = 'GPU result failed validation, falling back to CPU...'
+                break
+              }
             }
 
             if (runState.status === 'running') {
@@ -622,8 +628,7 @@ export function initApp(root: HTMLDivElement) {
             for (const r of results) {
               totalChecked += r.checked
               if (r.found && runState.status === 'running') {
-                const foundAddress = checksumAddress(r.found.address)
-                handleFound(r.found.privHex, foundAddress, pre, suf, target)
+                handleFound(r.found.privHex, r.found.address, pre, suf, target)
               }
             }
 
@@ -669,8 +674,7 @@ export function initApp(root: HTMLDivElement) {
           for (const r of results) {
             totalChecked += r.checked
             if (r.found && runState.status === 'running') {
-              const foundAddress = checksumAddress(r.found.address)
-              handleFound(r.found.privHex, foundAddress, pre, suf, target)
+              handleFound(r.found.privHex, r.found.address, pre, suf, target)
             }
           }
 
@@ -709,62 +713,24 @@ export function initApp(root: HTMLDivElement) {
     }
   }
 
-  function handleFound(privHex: string, claimedAddress: string, pre: string, suf: string, target: SearchTarget) {
-    // ── Verification gate ──
-    // The GPU kernel is hand-rolled WGSL; never trust its (priv, address) pair.
-    // Re-derive the address from the private key using the audited @noble path
-    // and reject any candidate whose real address doesn't match what the backend
-    // claimed. One EC derivation per *match* (matches are rare) — negligible cost,
-    // but it removes the only catastrophic failure mode (funding an address whose
-    // key you don't actually control). Applies to all three backends uniformly.
-    let priv: PrivKey32
-    let trustedWallet: string
-    let trustedTarget: string
-    try {
-      priv = hexToBytes(privHex) as PrivKey32
-      if (priv.length !== 32) throw new Error('bad key length')
-      trustedWallet = deriveWalletAddressFromPriv(priv) // '0x' + lowercase 40 hex
-      trustedTarget = target === 'first-contract'
-        ? '0x' + firstContractAddressFromWalletHex(trustedWallet.slice(2))
-        : trustedWallet
-    } catch {
-      // Invalid scalar (0 or >= curve order) or malformed hex — discard, keep searching.
-      noteRejectedMatch()
-      return
-    }
+  function handleFound(privHex: string, foundAddress: string, pre: string, suf: string, target: SearchTarget): boolean {
+    const verified = verifyFoundResult(privHex, foundAddress, pre, suf, target, caseSensitive.checked)
 
-    if (trustedTarget.toLowerCase() !== claimedAddress.toLowerCase()) {
-      // Backend produced a (priv, address) pair that does NOT correspond under real
-      // secp256k1 + keccak. Discard and keep searching (do not stop the run).
-      noteRejectedMatch()
-      return
-    }
-
-    // From here on, the noble-derived, EIP-55 checksummed address is the single
-    // source of truth — displayed, copied, and used for the keystore filename.
-    const foundAddress = checksumAddress(trustedTarget)
-    const walletAddress = target === 'wallet' ? foundAddress : checksumAddress(trustedWallet)
-
-    // Confirm it actually satisfies the requested prefix/suffix, applying the
-    // case-sensitive (EIP-55) constraint when enabled.
-    const preLower = pre.toLowerCase()
-    const sufLower = suf.toLowerCase()
-    const body = foundAddress.slice(2)
-    const bodyLower = body.toLowerCase()
-    const prefixOk = bodyLower.startsWith(preLower) && (!caseSensitive.checked || body.startsWith(pre))
-    const suffixOk = bodyLower.endsWith(sufLower) && (!caseSensitive.checked || body.endsWith(suf))
-
-    if (prefixOk && suffixOk) {
+    if (verified) {
+      const { priv, targetAddress: verifiedTargetAddress, walletAddress } = verified
       const timeS = (nowMs() - (runState as any).startedAtMs) / 1000
       const generated: number = runState.status === 'running' ? runState.generated : 0
 
-      runState = { status: 'found', generated, time: timeS, foundPriv: priv, foundAddress }
-      lastFound = { priv, targetAddress: foundAddress, walletAddress, target }
+      runState = { status: 'found', generated, time: timeS, foundPriv: priv, foundAddress: verifiedTargetAddress }
+      lastFound = { priv, targetAddress: verifiedTargetAddress, walletAddress, target }
       resultAddrLabel.textContent = targetResultLabel(target)
+      verificationProof.textContent = target === 'first-contract'
+        ? 'Verified locally: this private key derives to the deployer wallet, and its first CREATE nonce-0 contract address matches this result.'
+        : 'Verified locally: this private key derives to the displayed wallet address.'
 
-      const preMatch = foundAddress.slice(2, 2 + pre.length)
-      const sufMatch = foundAddress.slice(2 + 40 - suf.length)
-      const midPart = foundAddress.slice(2 + pre.length, 2 + 40 - suf.length)
+      const preMatch = verifiedTargetAddress.slice(2, 2 + pre.length)
+      const sufMatch = verifiedTargetAddress.slice(2 + 40 - suf.length)
+      const midPart = verifiedTargetAddress.slice(2 + pre.length, 2 + 40 - suf.length)
 
       addrText.innerHTML = `0x<span class="highlight">${preMatch}</span>${midPart}<span class="highlight">${sufMatch}</span>`
       walletText.textContent = walletAddress
@@ -782,7 +748,13 @@ export function initApp(root: HTMLDivElement) {
       updateStats()
 
       stopRequested = true
+      return true
     }
+
+    patternWarning.textContent = 'Rejected an invalid generated result before display. Retrying with a safer path.'
+    patternWarning.classList.remove('hidden')
+
+    return false
   }
 
   // Event listeners
