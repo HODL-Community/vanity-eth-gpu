@@ -40,12 +40,6 @@ export function firstContractAddressFromWalletHex(walletHex40: string): string {
   return out
 }
 
-export function firstContractAddressFromWalletAddress(walletAddress: string): string {
-  const normalized = walletAddress.toLowerCase().replace(/^0x/, '')
-  if (normalized.length !== 40) throw new Error('Invalid wallet address length')
-  return '0x' + firstContractAddressFromWalletHex(normalized)
-}
-
 export function checksumAddress(address: string): string {
   const addr = address.toLowerCase().replace(/^0x/, '')
   if (addr.length !== 40) throw new Error('Invalid address length')

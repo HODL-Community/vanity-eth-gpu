@@ -6,7 +6,16 @@ export type GpuVanityResult = {
 }
 
 export type GpuVanity = {
+  label: string
   search(prefixNibbles: number[], suffixNibbles: number[], batchSize: number, searchMode: number): Promise<GpuVanityResult | null>
+  destroy(): void
+}
+
+export type GpuVanityPool = {
+  // One independent instance per physical GPU.
+  instances: GpuVanity[]
+  // Human-readable label per instance, same order as `instances`.
+  labels: string[]
   destroy(): void
 }
 
@@ -39,13 +48,78 @@ function u32ArrayToHexBE(arr: Uint32Array, start: number, count: number): string
 
 const MAX_BATCH_SIZE = 32768
 
-export async function createGpuVanity(): Promise<GpuVanity> {
+// Build a short, human-readable label from a GPUAdapter's info.
+function adapterLabel(adapter: GPUAdapter, index: number): string {
+  // `info` is the modern synchronous accessor; older browsers exposed
+  // `requestAdapterInfo()` instead. Either way we degrade gracefully.
+  const info = (adapter as { info?: GPUAdapterInfo }).info
+  if (info) {
+    const name = info.description || [info.vendor, info.architecture].filter(Boolean).join(' ')
+    if (name) return name
+  }
+  return `GPU ${index + 1}`
+}
+
+// Stable identity key so we don't run two devices on the same physical GPU.
+function adapterKey(adapter: GPUAdapter, index: number): string {
+  const info = (adapter as { info?: GPUAdapterInfo }).info
+  if (info) {
+    const key = [info.vendor, info.architecture, info.device, info.description]
+      .filter(Boolean)
+      .join('|')
+    if (key) return key
+  }
+  return `adapter-${index}`
+}
+
+// Discover the distinct physical GPUs the browser is willing to expose.
+// WebGPU has no "enumerate all adapters" API — the only lever is
+// powerPreference, which on multi-GPU machines surfaces different chips.
+export async function enumerateGpuAdapters(): Promise<GPUAdapter[]> {
   if (!navigator.gpu) throw new Error('WebGPU not supported')
 
-  const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' })
-  if (!adapter) throw new Error('No WebGPU adapter')
+  const prefs: GPUPowerPreference[] = ['high-performance', 'low-power']
+  const adapters: GPUAdapter[] = []
+  const seen = new Set<string>()
 
-  const device = await adapter.requestDevice()
+  for (const powerPreference of prefs) {
+    let adapter: GPUAdapter | null = null
+    try {
+      adapter = await navigator.gpu.requestAdapter({ powerPreference })
+    } catch {
+      adapter = null
+    }
+    if (!adapter) continue
+    const key = adapterKey(adapter, adapters.length)
+    if (seen.has(key)) continue
+    seen.add(key)
+    adapters.push(adapter)
+  }
+
+  // Fallback: a default request if powerPreference yielded nothing.
+  if (adapters.length === 0) {
+    const adapter = await navigator.gpu.requestAdapter()
+    if (adapter) adapters.push(adapter)
+  }
+
+  return adapters
+}
+
+export async function createGpuVanity(adapter?: GPUAdapter, label?: string): Promise<GpuVanity> {
+  if (!navigator.gpu) throw new Error('WebGPU not supported')
+
+  const resolvedAdapter = adapter ?? await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' })
+  if (!resolvedAdapter) throw new Error('No WebGPU adapter')
+  const resolvedLabel = label ?? adapterLabel(resolvedAdapter, 0)
+
+  const device = await resolvedAdapter.requestDevice()
+
+  // Surface device-loss for diagnostics. An in-flight search will reject when the
+  // device is lost, which the caller's error handler turns into UI recovery.
+  let destroyed = false
+  void device.lost.then((info) => {
+    if (!destroyed) console.warn(`[vanity] WebGPU device "${resolvedLabel}" lost: ${info.reason ?? 'unknown'} — ${info.message}`)
+  })
 
   const module = device.createShaderModule({ code: shaderSource })
 
@@ -86,8 +160,6 @@ export async function createGpuVanity(): Promise<GpuVanity> {
 
   // Reusable params array
   const params = new Uint32Array(4 + 40 + 40)
-
-  let destroyed = false
 
   async function search(
     prefixNibbles: number[],
@@ -174,5 +246,35 @@ export async function createGpuVanity(): Promise<GpuVanity> {
     device.destroy()
   }
 
-  return { search, destroy }
+  return { label: resolvedLabel, search, destroy }
+}
+
+// Create one independent GpuVanity instance per distinct physical GPU.
+// Falls back to a single instance when only one GPU is available.
+export async function createGpuVanityPool(): Promise<GpuVanityPool> {
+  const adapters = await enumerateGpuAdapters()
+  if (adapters.length === 0) throw new Error('No WebGPU adapter')
+
+  const instances: GpuVanity[] = []
+  const labels: string[] = []
+
+  for (let i = 0; i < adapters.length; i++) {
+    try {
+      const inst = await createGpuVanity(adapters[i], adapterLabel(adapters[i], i))
+      instances.push(inst)
+      labels.push(inst.label)
+    } catch {
+      // Skip a GPU whose device creation failed; others may still work.
+    }
+  }
+
+  if (instances.length === 0) throw new Error('Failed to create any GPU device')
+
+  return {
+    instances,
+    labels,
+    destroy() {
+      for (const inst of instances) inst.destroy()
+    },
+  }
 }
